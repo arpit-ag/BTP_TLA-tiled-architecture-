@@ -1,0 +1,2392 @@
+
+/*
+    Copyright (C) 1999-2005 by Mark D. Hill and David A. Wood for the
+    Wisconsin Multifacet Project.  Contact: gems@cs.wisc.edu
+    http://www.cs.wisc.edu/gems/
+
+    --------------------------------------------------------------------
+
+    This file is part of the SLICC (Specification Language for
+    Implementing Cache Coherence), a component of the Multifacet GEMS
+    (General Execution-driven Multiprocessor Simulator) software
+    toolset originally developed at the University of Wisconsin-Madison.
+                                                                                
+    SLICC was originally developed by Milo Martin with substantial
+    contributions from Daniel Sorin.
+
+    Substantial further development of Multifacet GEMS at the
+    University of Wisconsin was performed by Alaa Alameldeen, Brad
+    Beckmann, Jayaram Bobba, Ross Dickson, Dan Gibson, Pacia Harper,
+    Derek Hower, Milo Martin, Michael Marty, Carl Mauer, Michelle Moravan,
+    Kevin Moore, Manoj Plakal, Daniel Sorin, Haris Volos, Min Xu, and Luke Yen.
+
+    --------------------------------------------------------------------
+
+    If your use of this software contributes to a published paper, we
+    request that you (1) cite our summary paper that appears on our
+    website (http://www.cs.wisc.edu/gems/) and (2) e-mail a citation
+    for your published paper to gems@cs.wisc.edu.
+
+    If you redistribute derivatives of this software, we request that
+    you notify us and either (1) ask people to register with us at our
+    website (http://www.cs.wisc.edu/gems/) or (2) collect registration
+    information and periodically send it to us.
+
+    --------------------------------------------------------------------
+
+    Multifacet GEMS is free software; you can redistribute it and/or
+    modify it under the terms of version 2 of the GNU General Public
+    License as published by the Free Software Foundation.
+
+    Multifacet GEMS is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+    General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with the Multifacet GEMS; if not, write to the Free Software
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA
+    02111-1307, USA
+
+    The GNU General Public License is contained in the file LICENSE.
+
+### END HEADER ###
+*/
+/*
+ * $Id: MSI_MOSI_CMP_directory-L2cache.sm 1.12 05/01/19 15:55:40-06:00 beckmann@s0-28.cs.wisc.edu $
+ *
+ */
+
+machine(L2Cache, "MOSI Directory L2 Cache CMP") {
+
+  // L2 BANK QUEUES
+  // From local bank of L2 cache TO the network
+  MessageBuffer DirRequestFromL2Cache, network="To", virtual_network="2", ordered="false";  // this L2 bank -> Memory
+  MessageBuffer L1RequestFromL2Cache, network="To", virtual_network="1", ordered="false";  // this L2 bank -> a local L1
+  MessageBuffer responseFromL2Cache, network="To", virtual_network="3", ordered="false";  // this L2 bank -> a local L1 || Memory
+  
+  // Two Buffer added (by Shirshendu) for DTLA.
+  MessageBuffer L2RequestFromL2Cache, network="To", virtual_network="5", ordered="false";  //  this L2 bank -> L2 bank
+  MessageBuffer L2ResponseFromL2Cache, network="To", virtual_network="6", ordered="false";  // L2 bank -> this L2 bank.
+
+  // FROM the network to this local bank of L2 cache
+  MessageBuffer L1RequestToL2Cache, network="From", virtual_network="0", ordered="false";  // a local L1 -> this L2 bank
+  MessageBuffer responseToL2Cache, network="From", virtual_network="3", ordered="false";  // a local L1 || Memory -> this L2 bank
+  MessageBuffer unblockToL2Cache, network="From", virtual_network="4", ordered="false";  // a local L1 || Memory -> this L2 bank
+
+  // Two Buffer added (by Shirshendu) for DTLA.
+  MessageBuffer L2RequestToL2Cache, network="From", virtual_network="5", ordered="false";  //  this L2 bank -> L2 bank
+  MessageBuffer L2ResponseToL2Cache, network="From", virtual_network="6", ordered="false";  // L2 bank -> this L2 bank.
+  
+  
+
+  // STATES
+  enumeration(State, desc="L2 Cache states", default="L2Cache_State_NP") {
+    // Base states
+    NP, desc="Not present in either cache";
+    SS, desc="L2 cache entry Shared, also present in one or more L1s";
+    M, desc="L2 cache entry Modified, not present in any L1s", format="!b";
+    MT, desc="L2 cache entry Modified in a local L1, assume L2 copy stale", format="!b";
+
+    // L2 replacement
+    M_I, desc="L2 cache replacing, have all acks, sent dirty data to memory, waiting for ACK from memory";
+    MT_I, desc="L2 cache replacing, getting data from exclusive";
+    MCT_I, desc="L2 cache replacing, clean in L2, getting data or ack from exclusive";
+    I_I, desc="L2 replacing clean data, need to inv sharers and then drop data";
+    S_I, desc="L2 replacing dirty data, collecting acks from L1s";
+
+    // Transient States for fetching data from memory
+    ISS, desc="L2 idle, got single L1_GETS, issued memory fetch, have not seen response yet";
+    IS, desc="L2 idle, got L1_GET_INSTR or multiple L1_GETS, issued memory fetch, have not seen response yet";
+    IM, desc="L2 idle, got L1_GETX, issued memory fetch, have not seen response(s) yet";
+
+    // Blocking states 
+    SS_MB, desc="Blocked for L1_GETX from SS";
+    MT_MB, desc="Blocked for L1_GETX from MT";
+    M_MB, desc="Blocked for L1_GETX from M";
+
+    MT_IIB, desc="Blocked for L1_GETS from MT, waiting for unblock and data";
+    MT_IB, desc="Blocked for L1_GETS from MT, got unblock, waiting for data";
+    MT_SB, desc="Blocked for L1_GETS from MT, got data,  waiting for unblock";
+  
+    // **************** Additional states for DTLA (added by Shirshendu) *************** 
+    M_UM, desc="";
+    SS_UM, desc="";
+    MT_UM, desc="";
+    M_UR, desc="";
+    SS_UR, desc="";
+    MT_UR, desc="";
+    TS, desc="";
+    // **********************END of additional states ****************************
+  }
+
+  // EVENTS
+  enumeration(Event, desc="L2 Cache events") {
+    // L2 events
+
+    // events initiated by the local L1s
+    L1_GET_INSTR,            desc="a L1I GET INSTR request for a block maped to us";
+    L1_GETS,                 desc="a L1D GETS request for a block maped to us";
+    L1_GETX,                 desc="a L1D GETX request for a block maped to us";
+    L1_UPGRADE,              desc="a L1D GETX request for a block maped to us";
+
+    L1_PUTX,                 desc="L1 replacing data";
+    L1_PUTX_old,             desc="L1 replacing data, but no longer sharer";
+
+    Fwd_L1_GETX,             desc="L1 did not have data, so we supply";
+    Fwd_L1_GETS,             desc="L1 did not have data, so we supply";
+    Fwd_L1_GET_INSTR,        desc="L1 did not have data, so we supply";
+
+    // events initiated by this L2
+    L2_Replacement,          desc="L2 Replacement", format="!r";
+    L2_Replacement_clean,    desc="L2 Replacement, but data is clean", format="!r";
+
+    // events from memory controller
+    Mem_Data,     	     desc="data from memory", format="!r";
+    Mem_Ack,                 desc="ack from memory", format="!r";
+
+    // M->S data writeback
+    WB_Data,  desc="data from L1";
+    WB_Data_clean,  desc="clean data from L1";
+    Ack,      desc="writeback ack";
+    Ack_all,      desc="writeback ack";
+
+    Unblock, desc="Unblock from L1 requestor";
+    Unblock_Cancel, desc="Unblock from L1 requestor (FOR XACT MEMORY)";
+    Exclusive_Unblock, desc="Unblock from L1 requestor";
+
+    // ************ Additional events for DTLA (added by Shirshendu) *****************************
+    BS_Search, desc="Bankset search.";
+    BLK_NFND, desc="To do";
+    BLK_EXT, desc="exit the request of L1 as it is already forwarded to propoer L2 bank";
+    BLK_SND, desc="Forward the block to the proper L2 bank.";
+    TLA_ACK, desc="";
+    TLA_ACKALL_UM, desc="All ack reached and the block is under migration now";
+    UNDER_MGR,	desc="Set under migration status";    
+    RECYC_RQL2, desc="";
+    RECYC_RSPL2, desc="";
+    BLK_FW, desc="";
+    BLK_FND_X, desc="";
+    IGNR_RESPONCE, desc="";
+    FWD_RQST, desc="";
+    MIGRATE_P, desc="";
+    MGR_DONE, desc="";
+    IN_TLATBE, desc="";
+    BLK_Moved2Friend, desc="";
+    L2_CSD_Replacement, desc="";
+    L1_GET_INSTR_X,          desc="a L1I GET INSTR request for a block maped to us (in case of DTLA)";
+    L1_GETS_X,               desc="a L1D GETS request for a block maped to us (in case of DTLA)";
+    L1_GETX_X,               desc="a L1D GETX request for a block maped to us (in case of DTLA)";
+    BLK_UNDER_RPL,	desc="";	
+    BLK_BUSY,		desc="";
+    DISCARD_BLK,	desc="";
+    FWD_RPL,		desc="";
+    CSD_RPL_AM,		desc="";
+    CSD_RPL_AMT,	desc="";
+    CSD_RPL_AS,		desc="";
+    CSD_RPL,		desc="";
+    CSD_RPL_clean,	desc="";
+    R_CSD_RPL,		desc="";
+    MIGRATE_R,		desc="";
+    // *********************** END of additional events *****************************************
+  }
+
+  // TYPES
+
+  // CacheEntry
+  structure(Entry, desc="...", interface="AbstractCacheEntry") {
+    State CacheState,          desc="cache state";
+    NetDest Sharers,               desc="tracks the L1 shares on-chip";
+    MachineID Exclusive,          desc="Exclusive holder of block";
+    DataBlock DataBlk,       desc="data for the block";
+    bool Dirty, default="false", desc="data is dirty";
+  }
+
+  // TBE fields
+  structure(TBE, desc="...") {
+    Address Address,            desc="Physical address for this TBE";
+    State TBEState,             desc="Transient state";
+    DataBlock DataBlk,          desc="Buffer for the data block";
+    bool Dirty, default="false", desc="Data is Dirty";
+
+    NetDest L1_GetS_IDs,            desc="Set of the internal processors that want the block in shared state";
+    MachineID L1_GetX_ID,          desc="ID of the L1 cache to forward the block to once we get a response";
+    bool isPrefetch,            desc="Set if this was caused by a prefetch";
+
+    int pendingAcks,            desc="number of pending acks for invalidates during writeback";
+  }
+  
+
+  // **********************************************************************************
+  // Three structures: TLATBE,LockTAB and MGRTAB added (by Shirshendu Das) for DTLA.
+  structure(TLATBE, desc="Used for temporary block store during SEARCH, REPLACEMENT and MIGRATION") {
+    Address Address,            desc="Physical address for this TBE";
+    State TLATBEState,          desc="Transient state";
+    DataBlock DataBlk,          desc="Buffer for the data block";
+    bool Dirty, default="false", desc="Data is Dirty";
+    MachineID Requestor,        desc="ID of the L1 cache to forward the block to once we get a response";
+    CoherenceRequestType Type,	desc="The request type of L1.";
+    bool isUnderMigration, default="false",	desc="The block is under migration process or not";
+    PrefetchBit prefetch,	desc="Is this is a prefetch bit";
+    AccessModeType AccessMode,	desc="user/supervisor access type";
+    int pendingAcks,		desc="number of pending acks for invalidates during writeback";
+    TLATBEEntry entryType,	desc="Type of the entry. e.g., Searching, Replacement or Migration";
+    NetDest Sharers,            desc="tracks the L1 shares on-chip";
+  }
+  structure(LockTAB, desc="Used to lock a block, especially during forwarded request access") {
+    Address Address,            desc="TO DO";
+    int count,			desc="Number of current locks on this address"; 
+    // *** Count is required because it may be possible that more that one core can request a block same time, hence multiple forwarded request
+    //     can be exist in the local L1 request queue (inserted specially for TLA). The block present in the bank must not be removed or migrated untill 
+    //      any of such request exists in local L1 queue.  
+  }
+
+  structure(MGRTAB,desc="Possible migration table"){ // This 
+     Address Address;
+     MachineID lastAccess; 
+     int totalCount;
+     // Time lastAccessTime; // We will not use the concept of time initially.
+  }
+
+
+structure(RequestMsgL2, desc="...", interface="NetworkMessage") {
+  Address Address,              desc="Physical address for this request";
+  CoherenceRequestType Type,	desc="Type of the original L1 request (GetS, GetX, PutX, etc)";
+  CoherenceRequestType TypeL2,	desc="Type of L2 request to another L2 (BSearch etc)";
+  AccessModeType AccessMode,    desc="user/supervisor access type";
+  MachineID Requestor,		desc="What component request";
+  MachineID Sender,		desc="What component request"; 
+  // ***** Sender is only required when Requestor is required to carry the identity of original requestor machine. 
+  //       Otherwise Requestor serves the need.
+  
+  NetDest Destination,          desc="What components receive the request, includes MachineType and num";
+  MessageSizeType MessageSize,  desc="size category of the message";
+  bool Dirty, default="false",  desc="Dirty bit";
+  PrefetchBit Prefetch,         desc="Is this a prefetch request";
+  NetDest Sharers,		desc="";
+  int counter,			desc="Can be used for several purposes.";
+  DataBlock DataBlk,            desc="";
+  Entry cacheBlk,		desc="The entire cache block used in replacement and migration";
+  Time lastAccessed,		desc="Last accessed time of the block";
+}
+  
+  // **********************************************************************************
+
+external_type(CacheMemory) {
+    bool cacheAvail(Address);
+    Address cacheProbe(Address);
+    void allocate(Address);
+    void deallocate(Address);
+    Entry lookup(Address);
+    void changePermission(Address, AccessPermission);
+    bool isTagPresent(Address);
+    void setMRU(Address);
+    
+    //  ********* Functions added (by Shirshendu Das) for DTLA.
+    Time getLastAccessTime(Address);
+    Time getLastAccessTimeOfVictimBlock(Address);
+    void placeNewBlockInPlaceOf(Entry,Address);
+    void placeNewBlockInCache(Entry);
+    bool isOlderThanVictim(Time,Address);
+    void setLRU(Address);
+  }
+
+  external_type(TBETable) {
+    TBE lookup(Address);
+    void allocate(Address);
+    void deallocate(Address);
+    bool isPresent(Address);
+  }
+
+  external_type(TLATBETable) {
+    TLATBE lookup(Address);
+    void allocate(Address);
+    void deallocate(Address);
+    bool isPresent(Address);
+    bool isNotPresent(Address);
+  }
+  external_type(LockTable) {
+    LockTAB lookup(Address);
+    void allocate(Address);
+    void deallocate(Address);
+    bool isPresent(Address);
+    bool isNotPresent(Address);
+  }
+  external_type(MGRTable) {
+    MGRTAB lookup(Address);
+    void allocate(Address);
+    void deallocate(Address);
+    bool isPresent(Address);
+    bool isNotPresent(Address);
+  }
+
+  TBETable L2_TBEs, template_hack="<L2Cache_TBE>";
+  // This table is used for storing the blocks details which are possible to migrate.  
+  TLATBETable L2_TLATBEs, template_hack="<L2Cache_TLATBE>"; // Added (by Shirshendu Das) for DTLA.
+  LockTable L2_LOCKTAB, template_hack="<L2Cache_LockTAB >";// Added (by Shirshendu Das) for DTLA.
+  MGRTable MGRTABLE, template_hack="<L2Cache_MGRTAB >"; // Added (by Shirshendu Das) for DTLA.
+  CacheMemory L2cacheMemory, template_hack="<L2Cache_Entry>", constructor_hack='L2_CACHE_NUM_SETS_BITS,L2_CACHE_ASSOC,MachineType_L2Cache,int_to_string(i)';
+
+  // inclusive cache, returns L2 entries only
+  Entry getL2CacheEntry(Address addr), return_by_ref="yes" {
+    return L2cacheMemory[addr];
+  }
+  
+  void changeL2Permission(Address addr, AccessPermission permission) {
+    if (L2cacheMemory.isTagPresent(addr)) {
+      return L2cacheMemory.changePermission(addr, permission);
+    }
+  }
+
+  string getCoherenceRequestTypeStr(CoherenceRequestType type) {
+    return CoherenceRequestType_to_string(type);
+  }
+
+  bool isL2CacheTagPresent(Address addr) {
+    return (L2cacheMemory.isTagPresent(addr));
+  }
+
+  bool isOneSharerLeft(Address addr, MachineID requestor) {
+    assert(L2cacheMemory[addr].Sharers.isElement(requestor));
+    return (L2cacheMemory[addr].Sharers.count() == 1);
+  }
+
+  bool isSharer(Address addr, MachineID requestor) {
+    if (L2cacheMemory.isTagPresent(addr)) {
+      return L2cacheMemory[addr].Sharers.isElement(requestor);
+    } else {
+      return false;
+    }
+  }
+
+  void addSharer(Address addr, MachineID requestor) {
+    DEBUG_EXPR(machineID);
+    DEBUG_EXPR(requestor);
+    DEBUG_EXPR(addr);
+    assert(map_L1CacheMachId_to_L2Cache(addr, requestor) == machineID);
+    L2cacheMemory[addr].Sharers.add(requestor);
+  }
+
+
+  Event L1Cache_request_type_to_event(CoherenceRequestType type, Address addr, MachineID requestor) {
+    if(type == CoherenceRequestType:GETS) {
+      return Event:L1_GETS;
+    } else if(type == CoherenceRequestType:GET_INSTR) {
+      return Event:L1_GET_INSTR;
+    } else if (type == CoherenceRequestType:GETX) {
+      return Event:L1_GETX;
+    } else if (type == CoherenceRequestType:UPGRADE) {
+      if ( isL2CacheTagPresent(addr) && getL2CacheEntry(addr).Sharers.isElement(requestor) ) {
+        return Event:L1_UPGRADE;
+      } else {
+        return Event:L1_GETX;
+      }
+    } else if (type == CoherenceRequestType:PUTX) {
+      if (isSharer(addr, requestor)) {
+        return Event:L1_PUTX;
+      } else {
+        return Event:L1_PUTX_old;
+      }
+    } else {
+      DEBUG_EXPR(addr);
+      DEBUG_EXPR(type);
+      error("Invalid L1 forwarded request type");
+    }
+  }
+ 
+  // ******************************************************************************************************
+  //      Functions added/modified (by Shirshendu Das) for DTLA
+  // ******************************************************************************************************
+  bool isL1CacheWriteRequest(CoherenceRequestType type) {
+    if(type == CoherenceRequestType:PUTX) {
+      return true;
+    }else {
+      return false;
+    }
+  }
+
+  // bool isL1CacheWriteResponse(CoherenceResponseType type) {
+  //   if(type == CoherenceRequestType:PUTX) {
+  //     return true;
+  //   }else {
+  //     return false;
+  //  }
+  // }
+
+  State getState(Address addr) {
+    if(L2_TLATBEs.isPresent(addr)){
+       return L2_TLATBEs[addr].TLATBEState;
+    } else if(L2_TBEs.isPresent(addr)) { 
+      return L2_TBEs[addr].TBEState;
+    } else if (isL2CacheTagPresent(addr)) {
+      return getL2CacheEntry(addr).CacheState;
+    }
+    return State:NP;
+  }
+  string getStateStr(Address addr) {  // This is an existing function but has to be placed after getState. Otherwise showing error.
+    return L2Cache_State_to_string(getState(addr));
+  }
+
+  void setState(Address addr, State state) {
+    if(L2_TLATBEs.isPresent(addr)){
+       // The first three conditions are written for migration purpose. When a block reaches its unblocked states, a condition is checked
+       // whether the block is possible to migrate or not. If migration initiates then the state of the block should be under migration.
+       // Remember: When a migration will initiate the block will be removed from cachememory hence no need to add similar conditions in
+       // TBE and CacheMemory.
+       // *********** The three conditions may not be necessary if we use the first way of migration, that is initiating through a migration queue.
+       // **********************Read the documentation of TLA to understand the two migration initiating policies **************************   
+       if(state== State:M){
+          L2_TLATBEs[addr].TLATBEState:=State:M_UM;
+       }else if(state== State:SS){
+          L2_TLATBEs[addr].TLATBEState:=State:SS_UM;
+       }else if(state== State:MT){
+          L2_TLATBEs[addr].TLATBEState:=State:MT_UM;
+       }else{
+          L2_TLATBEs[addr].TLATBEState:=state;
+       } 
+       // return; 
+       // A block is in TLATBE means the block cannot be in TBE or cachememory.
+    }else{   
+
+       // MUST CHANGE
+       if (L2_TBEs.isPresent(addr)) {
+         L2_TBEs[addr].TBEState := state;
+       }
+
+       if (isL2CacheTagPresent(addr)) {
+          getL2CacheEntry(addr).CacheState := state;
+    
+          // Set permission  
+          if (state == State:SS ) {
+              changeL2Permission(addr, AccessPermission:Read_Only);
+          } else if (state == State:M) {
+              changeL2Permission(addr, AccessPermission:Read_Write);
+          } else if (state == State:MT) {
+              changeL2Permission(addr, AccessPermission:Stale);
+          } else { 
+              changeL2Permission(addr, AccessPermission:Busy);
+          }
+       }
+    }
+  }
+
+  void increamentLOCKTABLE(Address addr){
+     if(L2_LOCKTAB.isPresent(addr)){
+          L2_LOCKTAB[addr].count:= L2_LOCKTAB[addr].count+1;
+     }else{
+          L2_LOCKTAB.allocate(addr);
+          L2_LOCKTAB[addr].count:= 1;
+     }
+  }
+  void decrementLOCKTABLE(Address addr){
+      if(L2_LOCKTAB[addr].count>1){
+          L2_LOCKTAB[addr].count:= L2_LOCKTAB[addr].count-1;
+      }else{
+          L2_LOCKTAB.deallocate(addr);
+      }
+  }
+  
+  // *********IsMigrationPossible()-- function is written in two format. One in simple format, where the migration will always happen if the
+  //          basic condition satisfies. The second format is bit complicated and it also checks the two banks are on same col or not and also
+  //          if the distance between the two banks is more than a predefined threshold or not.
+  // ****************ONLY ONE CAN BE USED AT A TIME ******************************************************* 
+  bool isMigrationPossible(Address addr){
+     if((L2_LOCKTAB.isNotPresent(addr)) && (MGRTABLE.isPresent(addr)) && (MGRTABLE[addr].totalCount>=2)){
+        return true;
+     }else{
+        return false;
+     }
+  }
+  bool isMigrationPossible2(Address addr,MachineID requestor){  // This function is currently not in use.
+     if((L2_LOCKTAB.isNotPresent(addr)) && (MGRTABLE.isPresent(addr)) && (MGRTABLE[addr].totalCount>=2)){ 
+        if(isDistributedBankSet()){
+           if(isSameCol(machineID,requestor)){ 
+              return false;
+           }else{
+              return true;
+           }
+       }else{
+          if(getDistance(machineID,requestor)>=2){
+            return true;
+          }else{
+            return false;
+          }
+       }
+     }else{
+       return false;
+     }
+  }
+
+  void manageMigrationTable(Address address){
+   if(MGRTABLE.isPresent(address)){
+      if(MGRTABLE[address].lastAccess==machineID){
+          MGRTABLE[address].totalCount:=MGRTABLE[address].totalCount+1;
+      }else{
+         MGRTABLE[address].lastAccess:=machineID;
+         MGRTABLE[address].totalCount:=1;
+      }   
+   }else{
+      MGRTABLE.allocate(address);
+      MGRTABLE[address].lastAccess:=machineID;
+      MGRTABLE[address].totalCount:=1;
+   }
+  }  
+
+
+  Event L1Cache_request_type_to_event_x(CoherenceRequestType type, Address addr, MachineID requestor) {
+    if(type == CoherenceRequestType:GETS) {
+      return Event:L1_GETS_X;
+    } else if(type == CoherenceRequestType:GET_INSTR) {
+      return Event:L1_GET_INSTR_X;
+    } else if (type == CoherenceRequestType:GETX) {
+      return Event:L1_GETX_X;
+    } else if (type == CoherenceRequestType:UPGRADE) {
+      if ( isL2CacheTagPresent(addr) && getL2CacheEntry(addr).Sharers.isElement(requestor) ) {
+        return Event:L1_UPGRADE; // May be L1_UPGRADE_X is not required.
+      } else {
+        return Event:L1_GETX_X;
+      }
+    } else if (type == CoherenceRequestType:PUTX) {
+      if (isSharer(addr, requestor)) {
+        return Event:L1_PUTX; 
+        // No alternative events created for PUTX. PUTX request from L1 means the block is in L2 (MT state) and it is handled in DTLA without 
+        // creating separate event for it.    
+      } else {
+        return Event:L1_PUTX_old; // I thing "L1_PUTX_old" is not called in MESI_CMP. (rare case).
+      }
+    } else {
+      DEBUG_EXPR(addr);
+      DEBUG_EXPR(type);
+      error("Invalid L1 forwarded request type");
+    }
+  }
+  // ********************End of added/modifed functions ******************************
+
+  // ************** OUT_PORTS *************************
+  out_port(L1RequestIntraChipL2Network_out, RequestMsg, L1RequestFromL2Cache);
+  out_port(DirRequestIntraChipL2Network_out, RequestMsg, DirRequestFromL2Cache);
+  out_port(responseIntraChipL2Network_out, ResponseMsg, responseFromL2Cache);
+
+  // Two out ports added (by Shirshendu Das) for DTLA.
+  out_port(L2RequestIntraChipL2Network_out,RequestMsgL2,L2RequestFromL2Cache);
+  out_port(L2ResponceIntraChipL2Network_out,ResponseMsgL2,L2ResponseFromL2Cache);
+
+  // *****************INPORTS **************************
+  // (INRSL2): Response IntraChip L2 Network - response msg to this particular L2 bank from another L2 bank.
+  in_port(L2ResponceIntraChipL2Network_in, ResponseMsgL2, L2ResponseToL2Cache) { // Added (by Shirshendu Das) for DTLA.
+    if(L2ResponceIntraChipL2Network_in.isReady()) {
+      peek(L2ResponceIntraChipL2Network_in, ResponseMsgL2) {
+        assert(in_msg.Destination.isElement(machineID));
+        if(machineIDToMachineType(in_msg.Sender) == MachineType:L2Cache) {
+          if(in_msg.TypeL2 == CoherenceResponseType:MGR_DONE) {
+             trigger(Event:MGR_DONE,in_msg.Address); 
+          } else if (in_msg.TypeL2 == CoherenceResponseType:BLK_FOUND) {
+              trigger(Event:BLK_EXT, in_msg.Address);   // Exit the search process.
+          }else if (in_msg.TypeL2 == CoherenceResponseType:BLK_FOUND_X) {
+              trigger(Event:BLK_SND, in_msg.Address);  // Block found in another bank. Now send the data to be written back on the location. (in case of PUTX).
+          }else if(in_msg.TypeL2==CoherenceResponseType:BLK_NOT_FOUND){  // ****** WHEN BLOCK NOT FOUND *******
+              if(L2_TLATBEs.isPresent(in_msg.Address)){ // If not in TLATBE then already "BLOCK FOUND" received so no need to continue, just ignore. 
+                  if(L2_TLATBEs[in_msg.Address].pendingAcks == 1){  // if last ACK received.
+                      if(L2_TLATBEs[in_msg.Address].isUnderMigration){    // if the block is found under migration by a previously reached ack.
+                         trigger(Event:TLA_ACKALL_UM,in_msg.Address);
+                      }else if(L2cacheMemory.cacheAvail(in_msg.Address)){ // NEED TO add ps2_popL2ResponceQueue to this transitions.
+                           trigger(L1Cache_request_type_to_event_x(L2_TLATBEs[in_msg.Address].Type, in_msg.Address, L2_TLATBEs[in_msg.Address].Requestor), in_msg.Address);
+
+                      // ********* REPLACEMENT PROCESS STARTS FROM HERE ************************
+                      }else if(L2_LOCKTAB.isPresent(L2cacheMemory.cacheProbe(in_msg.Address))){  // The local victime block is in search table then we cannot replace it.
+                           trigger(Event:RECYC_RSPL2,in_msg.Address);   
+                      }else if(isNotCascadingReplacement()){  // If local replacement then no need to forward the victim block to the nighbouring friend.
+
+                        if(L2cacheMemory[L2cacheMemory.cacheProbe(in_msg.Address) ].Dirty) {
+                           trigger(Event:L2_Replacement, L2cacheMemory.cacheProbe(in_msg.Address)); // NO NEED to add "ps2_popL2ResponceQueue" to this transition. 
+                         }else {
+                           trigger(Event:L2_Replacement_clean, L2cacheMemory.cacheProbe(in_msg.Address));
+                         }    
+                      }else{ 
+                          // No "clean" is required here because we are not actually replacing the block.
+                          // We will only replace it, once the nack of replacement receive.
+                          trigger(Event:L2_CSD_Replacement, L2cacheMemory.cacheProbe(in_msg.Address)); // NO NEED to add "ps2_popL2ResponceQueue" to this transition. 
+                      }
+                     // ****** REPLACEMENT PROCESS END ***********************************
+
+                     // **** The above replacement process only finishes the local replaceemnt policy. If the replacement process is cascading then
+                     //      it will start the process and forward the victim block to its neighbour friend. The cascading process is handled 
+                     //      in RequestL2 Queue.  
+                     // **********ALSO READ THE REPLACEMENT MECHANISM FROM DOCUMENTATION FOR CLEAR UNDERSTANDING OF VICTIM FORWARDING. 
+                  }else{
+                     trigger(Event:TLA_ACK,in_msg.Address);
+                  }
+              }else{
+                 trigger(Event:IGNR_RESPONCE,in_msg.Address);
+              }
+          }else if (in_msg.TypeL2 == CoherenceResponseType:UNDER_MGR) {
+              if(L2_TLATBEs[in_msg.Address].pendingAcks == 1){ // Last ack received is under migration means, recycle.
+                 trigger(Event:TLA_ACKALL_UM,in_msg.Address);
+              }else{
+                 trigger(Event:UNDER_MGR, in_msg.Address); // An intermediate ack received as under migration means change the TLATBE entry to UM.
+              }
+          }else if(in_msg.TypeL2 == CoherenceResponseType:BLK_FW){ // BLK_FW means forwarded block send by other L2.
+              trigger(Event:BLK_FW,in_msg.Address);
+          }else if(in_msg.TypeL2 == CoherenceResponseType:BLK_REMOVED){ 
+              // BLK_REMOVED means block is removed from cache and now it is in TBE only for completing the pre-replacement processes.
+              // In that case if the request is a write request (PUTX), then we just need to ignore it or drop it.
+              // Otherwise, for normal block access request, we have to re-cycle the request and wait for the replacement process to finish.  
+              trigger(Event:BLK_UNDER_RPL,in_msg.Address);
+          }else if(in_msg.TypeL2==CoherenceResponseType:RPL_BLK_PLACED){  
+              // ****The victim block (currently in TLATBE) is placed in a friend during cascading replacement. 
+              trigger(Event:BLK_Moved2Friend,in_msg.Address);
+          }else if(in_msg.TypeL2 == CoherenceResponseType:RPL_BLK_REMOVED){ 
+              // ***The victim block (currently in TLATBE) has not able to re-locate in any friend during cascading replacement.  
+              //    So now we have to remove the block from TLATBE. Note that the block is already replaced from the cache.
+              //    But the remove the block from TLATBE, we have to follow some coherence steps, as directed by the following two triggers.
+              if(L2_TLATBEs[in_msg.Address].Dirty){ 
+                  trigger(Event:L2_Replacement,in_msg.Address); // **** NO need cacheProbe() here. 
+              }else {
+                  trigger(Event:L2_Replacement_clean, in_msg.Address); // *** No need cacheProbe() here.
+              }    
+          }else {
+            error("unknown message type");
+          }
+        }
+      }
+    }  // if not ready, do nothing
+  }
+
+
+  // (INRSL1): Response IntraChip L2 Network - response msg to this particular L2 bank.
+  // In case of DTLA, no bankset search is required for any responce comming from L1 or main memory. The responces are the results of a previous request and
+  // the responce sender knows the exact sender of the request. Also note that, a block after sending request (intermidiate state) cannot be removed or
+  // migrated untill responce come.
+  // Hence no modification required here as compared to MESI_CMP.
+  in_port(responseIntraChipL2Network_in, ResponseMsg, responseToL2Cache) {
+    if (responseIntraChipL2Network_in.isReady()) {
+      peek(responseIntraChipL2Network_in, ResponseMsg) {
+        // test wether it's from a local L1 or an off chip source
+        assert(in_msg.Destination.isElement(machineID));
+        if(machineIDToMachineType(in_msg.Sender) == MachineType:L1Cache) {
+          if(in_msg.Type == CoherenceResponseType:DATA) {
+            if (in_msg.Dirty) {
+              trigger(Event:WB_Data, in_msg.Address);
+            } else {
+              trigger(Event:WB_Data_clean, in_msg.Address);
+            }
+          } else if (in_msg.Type == CoherenceResponseType:ACK) {
+            if ((L2_TBEs[in_msg.Address].pendingAcks - in_msg.AckCount) == 0) {
+              trigger(Event:Ack_all, in_msg.Address);
+            } else {
+              trigger(Event:Ack, in_msg.Address);
+            }
+          } else {
+            error("unknown message type");
+          }
+
+        } else { // external message
+          if(in_msg.Type == CoherenceResponseType:MEMORY_DATA) {
+            trigger(Event:Mem_Data, in_msg.Address);  // L2 now has data and all off-chip acks
+          } else if(in_msg.Type == CoherenceResponseType:MEMORY_ACK) {
+            trigger(Event:Mem_Ack, in_msg.Address);  // L2 now has data and all off-chip acks
+          } else {
+            error("unknown message type");
+          }
+        }
+      }
+    }  // if not ready, do nothing
+  }
+
+  // (INRQL1): L1 Request from L1 (direct or forwarded).
+  in_port(L1RequestIntraChipL2Network_in, RequestMsg, L1RequestToL2Cache) {
+    if(L1RequestIntraChipL2Network_in.isReady()) {
+      peek(L1RequestIntraChipL2Network_in,  RequestMsg) {
+        DEBUG_EXPR(in_msg.Address);
+        DEBUG_EXPR(id);
+        DEBUG_EXPR(getState(in_msg.Address));
+        DEBUG_EXPR(in_msg.Requestor);
+        DEBUG_EXPR(in_msg.Type);
+        DEBUG_EXPR(in_msg.Destination);
+        assert(machineIDToMachineType(in_msg.Requestor) == MachineType:L1Cache);
+        assert(in_msg.Destination.isElement(machineID));
+        if(L2_TLATBEs.isPresent(in_msg.Address)){ 
+            // The block is currently in TLATBE (either for search, migrate or csd replacement), hence cannot continue any other normal request right now.
+            trigger(Event:IN_TLATBE,in_msg.Address); 
+        }else if (L2cacheMemory.isTagPresent(in_msg.Address)) { 
+          // The L2 contains the block, so proceeded with handling the request
+          if(in_msg.isForwarded){ // No need to check "isPresent()" here, because if the message is forwarded, then definately there will be an entry in locktable.
+             // If the block is in lock table then the request is a forwarded request, inserted locally into the queue.
+             decrementLOCKTABLE(in_msg.Address);  // See the function (in this file only) to understand its purpose.
+          }else{
+             manageMigrationTable(in_msg.Address); 
+             // This function only manage migration table for those request which are not migrated. Migrated requests are managed by the action "inmgt_insertIntoMigrationTable".
+          }
+          trigger(L1Cache_request_type_to_event(in_msg.Type, in_msg.Address, in_msg.Requestor), in_msg.Address);
+        } else {
+             trigger(Event:BS_Search,in_msg.Address); 
+             // Start of a simultaneous bankset search, after detecting a miss in local bank. 
+             // The receiving L2 bank will decide as the request is a write request or not.
+        }
+      }
+    }
+  }
+
+  // (INRQL2): L2 request from other L2-banks. Only valid for DTLA.
+  in_port(L2RequestIntraChipL2Network_in,RequestMsgL2,L2RequestToL2Cache){
+    if(L2RequestIntraChipL2Network_in.isReady()){
+       peek(L2RequestIntraChipL2Network_in,RequestMsgL2){
+          assert(in_msg.Destination.isElement(machineID));
+          assert(machineIDToMachineType(in_msg.Sender) == MachineType:L2Cache);
+          // ****** NORMAL (NO WRITE REQUEST) SEARCH SECTION ******************************
+          if(in_msg.TypeL2 == CoherenceRequestType:BLK_SEARCH){
+             if(L2_TLATBEs.isPresent(in_msg.Address)){
+                 if(L2_TLATBEs[in_msg.Address].entryType==TLATBEEntry:SEARCH){
+                   trigger(Event:BLK_NFND,in_msg.Address); // send block not found. Coz the local L2 is also searching the block.
+                 }else{ // The block is either Under replacement or Under Migration.
+                   trigger(Event:BLK_BUSY,in_msg.Address);  // Send busy ack to the requestor.
+                 }
+             }else if(L2cacheMemory.isTagPresent(in_msg.Address)){
+                 //trigger(L1Cache_request_type_to_forwardedevent(in_msg.Type1,in_msg.Address,in_msg.Requestor),in_msg.Address); // This is for later option.
+                 trigger(Event:FWD_RQST,in_msg.Address);
+             }else{
+                 // If the block is under replacement, then it has to handled separately. This is done by writting two separate
+                 // transitions based on the current state of the block. Here under replacement means under pre-replacement process
+                 // and the block is in TBE and state of the block is *_I. 
+                 trigger(Event:BLK_NFND,in_msg.Address);
+             }
+          //*********END OF BLOCK NORMAL SEARCH *************************************
+
+          // *************** SEARCH SECTION FOR WRITE REQUEST (PUTX) **************************
+          }else if(in_msg.TypeL2 == CoherenceRequestType:BLK_SEARCH_X){
+            if(L2_TLATBEs.isPresent(in_msg.Address)){
+                 if(L2_TLATBEs[in_msg.Address].entryType==TLATBEEntry:SEARCH){
+                   trigger(Event:BLK_NFND,in_msg.Address); // send block not found. Coz the local L2 is also searching the block.
+                 }else{ // The block is either Under replacement or Under Migration.
+                   trigger(Event:BLK_BUSY,in_msg.Address);  // Send busy ack to the requestor.
+                 }
+             }else if(L2cacheMemory.isTagPresent(in_msg.Address)){
+                 trigger(Event:BLK_FND_X,in_msg.Address);
+             }else{
+                 trigger(Event:BLK_NFND,in_msg.Address);
+             }
+          //********END OF WRITE REQUEST BLOCK SEARCH ****************************
+
+          // ********REQUEST FOR CASCADING REPLACEMENT REQUESTS *****************************
+          }else if(in_msg.TypeL2 == CoherenceRequestType:BLK_CSD_RPL){
+             if(L2cacheMemory.cacheAvail(in_msg.Address)){ 
+                 // If free cache place available then place the block their and stop the replacement process. 
+                 // There are three different transactions only to set the final state of the block. The content of each transaction is same (except final state). 
+                 if(in_msg.cacheBlk.CacheState == State:M){ 
+                     trigger(Event:CSD_RPL_AM,in_msg.Address); // Note that the address is incomming block address and not the local victim block address. 
+                 }else if(in_msg.cacheBlk.CacheState==State:MT){
+                     trigger(Event:CSD_RPL_AMT,in_msg.Address); // Note that the address is incomming block address and not the local victim block address. 
+                 }else{
+                     trigger(Event:CSD_RPL_AS,in_msg.Address); // Note that the address is incomming block address and not the local victim block address. 
+                 }
+             }else if(L2cacheMemory.isOlderThanVictim(in_msg.lastAccessed,in_msg.Address)){  
+                if((get_CascadingRelacementCount()-in_msg.counter)==0){ // Is last cascading block. Used function is written in slicc component mapping.
+                  trigger(Event:DISCARD_BLK,in_msg.Address);  // Discard the forwaded block.
+                }else{
+                  trigger(Event:FWD_RPL,in_msg.Address); // Forward the forwarded block to the next neighbour.
+                }
+             }else{
+                 if(L2_LOCKTAB.isPresent(L2cacheMemory.cacheProbe(in_msg.Address))){   
+                    // A block currently in search table cannot be removed from the cache.
+                    // This will be a rear case, as we make a block MRU before inserting that bloack into search table.
+                    trigger(Event:RECYC_RQL2,in_msg.Address); // Recylce in local queue, let the original replacement initiator (another L2) to wait for the decision.
+                 }else{
+                    if((get_CascadingRelacementCount()-in_msg.counter)==0){ // If last cascading block then replace the local victime with forwarded victim.
+                       if(L2cacheMemory[L2cacheMemory.cacheProbe(in_msg.Address) ].Dirty) {
+                           trigger(Event:CSD_RPL, L2cacheMemory.cacheProbe(in_msg.Address)); // We can change the event name from CSD_RPL to something else.
+                       }else {
+                           trigger(Event:CSD_RPL_clean, L2cacheMemory.cacheProbe(in_msg.Address));
+                       }
+                    }else{  // Replace the local victime with forwarded victim and now continue cascading process with new forwarded victim.
+                        trigger(Event:R_CSD_RPL, L2cacheMemory.cacheProbe(in_msg.Address));
+                    }
+                 }
+             }
+          // ********** END OF CASCADING REPLACEMENT ************************
+
+          // *************** MIGRATION SECTION BEGINS *******************************************
+          }else if(in_msg.TypeL2 == CoherenceRequestType:BLK_MIGRN){
+              if(L2cacheMemory.cacheAvail(in_msg.Address)){
+                 trigger(Event:MIGRATE_P,in_msg.Address);
+              }else{
+                 trigger(Event:MIGRATE_R,L2cacheMemory.cacheProbe(in_msg.Address));
+              }
+          }
+          // ************ END OF MIGRATION SECTION ******************************************
+       }
+    }
+  }
+
+
+  in_port(L1unblockNetwork_in, ResponseMsg, unblockToL2Cache) {
+    if(L1unblockNetwork_in.isReady()) {
+      peek(L1unblockNetwork_in,  ResponseMsg) {
+        assert(in_msg.Destination.isElement(machineID));
+        if (in_msg.Type == CoherenceResponseType:EXCLUSIVE_UNBLOCK) {
+          trigger(Event:Exclusive_Unblock, in_msg.Address);
+        } else if (in_msg.Type == CoherenceResponseType:UNBLOCK) {
+          trigger(Event:Unblock, in_msg.Address);
+        } else {
+          error("unknown unblock message");
+        }
+      }
+    }
+  }
+
+  // ACTIONS
+  action(a_issueFetchToMemory, "a", desc="fetch data from memory") {
+    peek(L1RequestIntraChipL2Network_in, RequestMsg) {
+      enqueue(DirRequestIntraChipL2Network_out, RequestMsg, latency="L2_REQUEST_LATENCY") {
+        out_msg.Address := address;
+        out_msg.Type := CoherenceRequestType:GETS;
+        out_msg.Requestor := machineID;
+        out_msg.Destination.add(map_Address_to_Directory(address));
+        out_msg.MessageSize := MessageSizeType:Control;
+      }
+    }
+  }
+  action(b_forwardRequestToExclusive, "b", desc="Forward request to the exclusive L1") {
+    peek(L1RequestIntraChipL2Network_in, RequestMsg) {
+      enqueue(L1RequestIntraChipL2Network_out, RequestMsg, latency="1") {
+        out_msg.Address := address;
+        out_msg.Type := in_msg.Type;
+        out_msg.Requestor := in_msg.Requestor;
+        out_msg.Forwarder:= machineID; // This addition is required for DTLA (added by Shirshendu Das).
+        out_msg.Destination.add(L2cacheMemory[address].Exclusive);
+        out_msg.MessageSize := MessageSizeType:Request_Control;
+      }
+    }
+  }
+  action(c_exclusiveReplacement, "c", desc="Send data to memory") {
+    enqueue(responseIntraChipL2Network_out, ResponseMsg, latency="L2_RESPONSE_LATENCY") {
+      out_msg.Address := address;
+      out_msg.Type := CoherenceResponseType:MEMORY_DATA;
+      out_msg.Sender := machineID;
+      out_msg.Destination.add(map_Address_to_Directory(address));
+      out_msg.DataBlk := getL2CacheEntry(address).DataBlk;
+      out_msg.Dirty := getL2CacheEntry(address).Dirty;
+      out_msg.MessageSize := MessageSizeType:Response_Data;
+    }
+  }
+  action(ct_exclusiveReplacementFromTBE, "ct", desc="Send data to memory") {
+    enqueue(responseIntraChipL2Network_out, ResponseMsg, latency="L2_RESPONSE_LATENCY") {
+      out_msg.Address := address;
+      out_msg.Type := CoherenceResponseType:MEMORY_DATA;
+      out_msg.Sender := machineID;
+      out_msg.Destination.add(map_Address_to_Directory(address));
+      out_msg.DataBlk := L2_TBEs[address].DataBlk;
+      out_msg.Dirty := L2_TBEs[address].Dirty;
+      out_msg.MessageSize := MessageSizeType:Response_Data;
+    }
+  }
+
+  action(d_sendDataToRequestor, "d", desc="Send data from cache to reqeustor") {
+    peek(L1RequestIntraChipL2Network_in, RequestMsg) {
+      enqueue(responseIntraChipL2Network_out, ResponseMsg, latency="L2_RESPONSE_LATENCY") {
+        out_msg.Address := address;
+        out_msg.Type := CoherenceResponseType:DATA;
+        out_msg.Sender := machineID;
+        out_msg.Destination.add(in_msg.Requestor);
+        out_msg.DataBlk := getL2CacheEntry(address).DataBlk;
+        out_msg.Dirty := getL2CacheEntry(address).Dirty;
+        out_msg.MessageSize := MessageSizeType:Response_Data;
+        out_msg.AckCount := 0 - getL2CacheEntry(address).Sharers.count();
+        if (getL2CacheEntry(address).Sharers.isElement(in_msg.Requestor)) {
+          out_msg.AckCount := out_msg.AckCount + 1;
+        }
+      }
+    }
+  }
+
+  action(dd_sendExclusiveDataToRequestor, "dd", desc="Send data from cache to reqeustor") {
+    peek(L1RequestIntraChipL2Network_in, RequestMsg) {
+      enqueue(responseIntraChipL2Network_out, ResponseMsg, latency="L2_RESPONSE_LATENCY") {
+        out_msg.Address := address;
+        out_msg.Type := CoherenceResponseType:DATA_EXCLUSIVE;
+        out_msg.Sender := machineID;
+        out_msg.Destination.add(in_msg.Requestor);
+        out_msg.DataBlk := getL2CacheEntry(address).DataBlk;
+        out_msg.Dirty := getL2CacheEntry(address).Dirty;
+        out_msg.MessageSize := MessageSizeType:Response_Data;
+ 
+        out_msg.AckCount := 0 - getL2CacheEntry(address).Sharers.count();
+        if (getL2CacheEntry(address).Sharers.isElement(in_msg.Requestor)) {
+          out_msg.AckCount := out_msg.AckCount + 1;
+        }
+      }
+    }
+  }
+
+  action(ds_sendSharedDataToRequestor, "ds", desc="Send data from cache to reqeustor") {
+    peek(L1RequestIntraChipL2Network_in, RequestMsg) {
+      enqueue(responseIntraChipL2Network_out, ResponseMsg, latency="L2_RESPONSE_LATENCY") {
+        out_msg.Address := address;
+        out_msg.Type := CoherenceResponseType:DATA;
+        out_msg.Sender := machineID;
+        out_msg.Destination.add(in_msg.Requestor);
+        out_msg.DataBlk := getL2CacheEntry(address).DataBlk;
+        out_msg.Dirty := getL2CacheEntry(address).Dirty;
+        out_msg.MessageSize := MessageSizeType:Response_Data;
+        out_msg.AckCount := 0;
+      }
+    }
+  }
+
+  action(e_sendDataToGetSRequestors, "e", desc="Send data from cache to all GetS IDs") {
+    assert(L2_TBEs[address].L1_GetS_IDs.count() > 0);
+    enqueue(responseIntraChipL2Network_out, ResponseMsg, latency="1") {
+      out_msg.Address := address;
+      out_msg.Type := CoherenceResponseType:DATA;
+      out_msg.Sender := machineID;
+      out_msg.Destination := L2_TBEs[address].L1_GetS_IDs;  // internal nodes
+      out_msg.DataBlk := getL2CacheEntry(address).DataBlk;
+      out_msg.Dirty := getL2CacheEntry(address).Dirty;
+      out_msg.MessageSize := MessageSizeType:Response_Data;
+    }
+  }
+
+  action(ex_sendExclusiveDataToGetSRequestors, "ex", desc="Send data from cache to all GetS IDs") {
+    assert(L2_TBEs[address].L1_GetS_IDs.count() == 1);
+    enqueue(responseIntraChipL2Network_out, ResponseMsg, latency="1") {
+      out_msg.Address := address;
+      out_msg.Type := CoherenceResponseType:DATA_EXCLUSIVE;
+      out_msg.Sender := machineID;
+      out_msg.Destination := L2_TBEs[address].L1_GetS_IDs;  // internal nodes
+      out_msg.DataBlk := getL2CacheEntry(address).DataBlk;
+      out_msg.Dirty := getL2CacheEntry(address).Dirty;
+      out_msg.MessageSize := MessageSizeType:Response_Data;
+    }
+  }
+
+
+  action(ee_sendDataToGetXRequestor, "ee", desc="Send data from cache to GetX ID") {
+    enqueue(responseIntraChipL2Network_out, ResponseMsg, latency="1") {
+      out_msg.Address := address;
+      out_msg.Type := CoherenceResponseType:DATA;
+      out_msg.Sender := machineID;
+      out_msg.Destination.add(L2_TBEs[address].L1_GetX_ID);
+      DEBUG_EXPR(out_msg.Destination);
+      out_msg.DataBlk := getL2CacheEntry(address).DataBlk;
+      out_msg.Dirty := getL2CacheEntry(address).Dirty;
+      DEBUG_EXPR(out_msg.Address);
+      DEBUG_EXPR(out_msg.Destination);
+      DEBUG_EXPR(out_msg.DataBlk);
+      out_msg.MessageSize := MessageSizeType:Response_Data;
+    }
+  }
+
+
+  action(f_sendInvToSharers, "f", desc="invalidate sharers for L2 replacement") {
+    enqueue(L1RequestIntraChipL2Network_out, RequestMsg, latency="1") {
+      out_msg.Address := address;
+      out_msg.Type := CoherenceRequestType:INV;
+      out_msg.Requestor := machineID;
+      out_msg.Forwarder:= machineID; // This addition is required for DTLA (added by Shirshendu Das).
+      out_msg.Destination := L2cacheMemory[address].Sharers;
+      out_msg.MessageSize := MessageSizeType:Request_Control;
+    }
+  }
+  action(fw_sendFwdInvToSharers, "fw", desc="invalidate sharers for request") {
+    peek(L1RequestIntraChipL2Network_in, RequestMsg) {
+      enqueue(L1RequestIntraChipL2Network_out, RequestMsg, latency="1") {
+        out_msg.Address := address;
+        out_msg.Type := CoherenceRequestType:INV;
+        out_msg.Requestor := in_msg.Requestor;
+        out_msg.Forwarder:= machineID; // This addition is required for DTLA (added by Shirshendu Das).
+        out_msg.Destination := L2cacheMemory[address].Sharers;
+        out_msg.MessageSize := MessageSizeType:Request_Control;
+      }
+    }
+  }
+  action(fwm_sendFwdInvToSharersMinusRequestor, "fwm", desc="invalidate sharers for request, requestor is sharer") {
+    peek(L1RequestIntraChipL2Network_in, RequestMsg) {
+      enqueue(L1RequestIntraChipL2Network_out, RequestMsg, latency="1") {
+        out_msg.Address := address;
+        out_msg.Type := CoherenceRequestType:INV;
+        out_msg.Requestor := in_msg.Requestor;
+        out_msg.Forwarder:= machineID; // This addition is required for DTLA (added by Shirshendu Das).
+        out_msg.Destination := L2cacheMemory[address].Sharers;
+        out_msg.Destination.remove(in_msg.Requestor);
+        out_msg.MessageSize := MessageSizeType:Request_Control;
+      }
+    }
+  }
+
+  // OTHER ACTIONS
+  action(i_allocateTBE, "i", desc="Allocate TBE for internal/external request(isPrefetch=0, number of invalidates=0)") {
+    check_allocate(L2_TBEs);
+    L2_TBEs.allocate(address);
+    L2_TBEs[address].L1_GetS_IDs.clear();
+    L2_TBEs[address].DataBlk := getL2CacheEntry(address).DataBlk;
+    L2_TBEs[address].Dirty := getL2CacheEntry(address).Dirty;
+    L2_TBEs[address].pendingAcks := getL2CacheEntry(address).Sharers.count();
+  }
+
+
+  action(jj_popL1RequestQueue, "\j", desc="Pop incoming L1 request queue") {
+    profileMsgDelay(0, L1RequestIntraChipL2Network_in.dequeue_getDelayCycles());
+  }
+  action(k_popUnblockQueue, "k", desc="Pop incoming unblock queue") {
+    profileMsgDelay(0, L1unblockNetwork_in.dequeue_getDelayCycles());
+  }
+  action(o_popIncomingResponseQueue, "o", desc="Pop Incoming Response queue") {
+    profileMsgDelay(3, responseIntraChipL2Network_in.dequeue_getDelayCycles());
+  }
+  action(m_writeDataToCache, "m", desc="Write data from response queue to cache") {
+    peek(responseIntraChipL2Network_in, ResponseMsg) {
+      getL2CacheEntry(address).DataBlk := in_msg.DataBlk;
+      getL2CacheEntry(address).Dirty := in_msg.Dirty;
+    }
+  }
+  action(mr_writeDataToCacheFromRequest, "mr", desc="Write data from response queue to cache") {
+    peek(L1RequestIntraChipL2Network_in, RequestMsg) {
+      getL2CacheEntry(address).DataBlk := in_msg.DataBlk;
+      getL2CacheEntry(address).Dirty := in_msg.Dirty;
+    }
+  }
+  action(q_updateAck, "q", desc="update pending ack count") {
+    peek(responseIntraChipL2Network_in, ResponseMsg) {
+      L2_TBEs[address].pendingAcks := L2_TBEs[address].pendingAcks - in_msg.AckCount;
+      APPEND_TRANSITION_COMMENT(in_msg.AckCount);
+      APPEND_TRANSITION_COMMENT(" p: ");
+      APPEND_TRANSITION_COMMENT(L2_TBEs[address].pendingAcks);
+    }
+  }
+  action(qq_writeDataToTBE, "\qq", desc="Write data from response queue to TBE") {
+    peek(responseIntraChipL2Network_in, ResponseMsg) {
+      L2_TBEs[address].DataBlk := in_msg.DataBlk;
+      L2_TBEs[address].Dirty := in_msg.Dirty;
+    }
+  }
+  action(ss_recordGetSL1ID, "\s", desc="Record L1 GetS for load response") {
+    peek(L1RequestIntraChipL2Network_in, RequestMsg) {
+      L2_TBEs[address].L1_GetS_IDs.add(in_msg.Requestor);
+    }
+  }
+  action(xx_recordGetXL1ID, "\x", desc="Record L1 GetX for store response") {
+    peek(L1RequestIntraChipL2Network_in, RequestMsg) {
+      L2_TBEs[address].L1_GetX_ID := in_msg.Requestor;
+    }
+  }
+  action(set_setMRU, "\set", desc="set the MRU entry") {
+    L2cacheMemory.setMRU(address);
+  }
+  action(qq_allocateL2CacheBlock, "\q", desc="Set L2 cache tag equal to tag of block B.") {
+    if (L2cacheMemory.isTagPresent(address) == false) {
+      L2cacheMemory.allocate(address);
+    }
+  }
+
+  action(t_sendWBAck, "t", desc="Send writeback ACK") {
+    peek(L1RequestIntraChipL2Network_in, RequestMsg) {
+      enqueue(responseIntraChipL2Network_out, ResponseMsg, latency="1") {
+        out_msg.Address := address;
+        out_msg.Type := CoherenceResponseType:WB_ACK;
+        out_msg.Sender := machineID;
+        out_msg.Destination.add(in_msg.Requestor);
+        out_msg.MessageSize := MessageSizeType:Response_Control;
+      }
+    }
+  }
+
+  action(ts_sendInvAckToUpgrader, "ts", desc="Send ACK to upgrader") {
+    peek(L1RequestIntraChipL2Network_in, RequestMsg) {
+      enqueue(responseIntraChipL2Network_out, ResponseMsg, latency="1") {
+        out_msg.Address := address;
+        out_msg.Type := CoherenceResponseType:ACK;
+        out_msg.Sender := machineID;
+        out_msg.Forwarder:=machineID;
+        out_msg.Destination.add(in_msg.Requestor);
+        out_msg.MessageSize := MessageSizeType:Response_Control;
+        // upgrader doesn't get ack from itself, hence the + 1
+        out_msg.AckCount := 0 - getL2CacheEntry(address).Sharers.count() + 1;
+      }
+    }
+  }
+
+  action(uu_profileMiss, "\u", desc="Profile the demand miss") {
+    peek(L1RequestIntraChipL2Network_in, RequestMsg) {
+      profile_L2Cache_miss(convertToGenericType(in_msg.Type), in_msg.AccessMode, MessageSizeTypeToInt(in_msg.MessageSize), in_msg.Prefetch, L1CacheMachIDToProcessorNum(in_msg.Requestor));
+    }
+  }
+  action(ww_profileMissNoDir, "\w", desc="Profile this transition at the L2 because Dir won't see the request") {
+    peek(L1RequestIntraChipL2Network_in, RequestMsg) {
+      // profile_request(in_msg.L1CacheStateStr, getStateStr(address), "NA", getCoherenceRequestTypeStr(in_msg.Type));
+    }
+  }
+
+  action(nn_addSharer, "\n", desc="Add L1 sharer to list") {
+    peek(L1RequestIntraChipL2Network_in, RequestMsg) {
+      addSharer(address, in_msg.Requestor);
+      APPEND_TRANSITION_COMMENT( getL2CacheEntry(address).Sharers );
+    }    
+  }
+  action(nnu_addSharerFromUnblock, "\nu", desc="Add L1 sharer to list") {
+    peek(L1unblockNetwork_in, ResponseMsg) {
+      addSharer(address, in_msg.Sender);
+    }    
+  }
+  action(kk_removeRequestSharer, "\k", desc="Remove L1 Request sharer from list") {
+    peek(L1RequestIntraChipL2Network_in, RequestMsg) {
+      L2cacheMemory[address].Sharers.remove(in_msg.Requestor);
+    }    
+  }
+  action(ll_clearSharers, "\l", desc="Remove all L1 sharers from list") {
+    peek(L1RequestIntraChipL2Network_in, RequestMsg) {
+      L2cacheMemory[address].Sharers.clear();
+    }    
+  }
+  action(mm_markExclusive, "\m", desc="set the exclusive owner") {
+    peek(L1RequestIntraChipL2Network_in, RequestMsg) {
+      L2cacheMemory[address].Sharers.clear();
+      L2cacheMemory[address].Exclusive := in_msg.Requestor;
+      addSharer(address, in_msg.Requestor);
+    }    
+  }
+  action(mmu_markExclusiveFromUnblock, "\mu", desc="set the exclusive owner") {
+    peek(L1unblockNetwork_in, ResponseMsg) {
+      L2cacheMemory[address].Sharers.clear();
+      L2cacheMemory[address].Exclusive := in_msg.Sender;
+      addSharer(address, in_msg.Sender);
+    }    
+  }
+
+  action(zz_recycleL1RequestQueue, "zz", desc="recycle L1 request queue") {
+    L1RequestIntraChipL2Network_in.recycle();
+  }
+
+
+  // ***********************************************************************************
+  // (DA): ACTIONS-DTLA----- Actions added (By Shirshendu Das) for implementing DTLA..
+  // ************************************************************************************
+  action(ax_issueFetchToMemory, "ax", desc="fetch data from memory") {
+    enqueue(DirRequestIntraChipL2Network_out, RequestMsg, latency="L2_REQUEST_LATENCY") {
+      out_msg.Address := address;
+      out_msg.Type := CoherenceRequestType:GETS;
+      out_msg.Requestor := machineID;
+      out_msg.Destination.add(map_Address_to_Directory(address));
+      out_msg.MessageSize := MessageSizeType:Control;
+    }
+  }
+  action(sitl_sendInvToSharersfromTLATBE, "sitl", desc="invalidate sharers for L2 replacement") {
+    enqueue(L1RequestIntraChipL2Network_out, RequestMsg, latency="1") {
+      out_msg.Address := address;
+      out_msg.Type := CoherenceRequestType:INV;
+      out_msg.Requestor := machineID;
+      out_msg.Forwarder:= machineID; // This addition is required for DTLA (added by Shirshendu Das).
+      out_msg.Destination := L2_TLATBEs[address].Sharers;
+      out_msg.MessageSize := MessageSizeType:Control;
+    }
+  }
+  action(attbs_allocateTLATBE_Search,"attbs", desc="Insert into TLATBE table for block search."){
+    peek(L1RequestIntraChipL2Network_in,RequestMsg){
+        check_allocate(L2_TLATBEs);
+        L2_TLATBEs.allocate(address);
+        L2_TLATBEs[address].Address := address;
+        L2_TLATBEs[address].Requestor := in_msg.Requestor;
+        L2_TLATBEs[address].Type := in_msg.Type;
+        L2_TLATBEs[address].pendingAcks := get_BanksetSize()-1;
+        if(isL1CacheWriteRequest(in_msg.Type)) {
+           L2_TLATBEs[address].DataBlk := in_msg.DataBlk;
+        }
+        L2_TLATBEs[address].prefetch:=in_msg.Prefetch;
+        L2_TLATBEs[address].AccessMode:=in_msg.AccessMode;
+        L2_TLATBEs[address].entryType:=TLATBEEntry:SEARCH;
+     }
+  }
+
+  action(attbr_allocateTLATBE_replace, "attbr", desc="Insert into TLATBE table for block replacement."){
+     check_allocate(L2_TLATBEs);
+     L2_TLATBEs.allocate(address);
+     L2_TLATBEs[address].Address := address;
+     L2_TLATBEs[address].entryType:=TLATBEEntry:REPLACEMENT;
+     L2_TLATBEs[address].DataBlk := getL2CacheEntry(address).DataBlk;
+     L2_TLATBEs[address].Dirty := getL2CacheEntry(address).Dirty;
+     L2_TLATBEs[address].pendingAcks := getL2CacheEntry(address).Sharers.count();
+     L2_TLATBEs[address].Sharers:=getL2CacheEntry(address).Sharers;
+  }
+  action(atbrs_allocateTLATBE_Request_replace, "atbrs", desc="Insert into TLATBE table for block replacement."){ // ***UN*** currently unused action.
+     check_allocate(L2_TLATBEs);
+     L2_TLATBEs.allocate(address);
+     L2_TLATBEs[address].Address := address;
+     L2_TLATBEs[address].entryType:=TLATBEEntry:REPLACEMENT;
+     L2_TLATBEs[address].DataBlk := getL2CacheEntry(address).DataBlk;
+     L2_TLATBEs[address].Dirty := getL2CacheEntry(address).Dirty;
+     L2_TLATBEs[address].pendingAcks := getL2CacheEntry(address).Sharers.count();
+     L2_TLATBEs[address].Sharers:=getL2CacheEntry(address).Sharers;
+  }
+
+
+ action(snsr_sendSearchRequestToFriends,"snsr",desc="Send symultaneous search request to all friends"){
+   peek(L1RequestIntraChipL2Network_in, RequestMsg){
+     enqueue(L2RequestIntraChipL2Network_out,RequestMsgL2,latency="1"){
+        out_msg.Address:=address;
+        out_msg.Requestor:=in_msg.Requestor;
+        out_msg.Type := in_msg.Type;
+        out_msg.Sender:=machineID;
+        if(isL1CacheWriteRequest(in_msg.Type)){
+            out_msg.TypeL2 := CoherenceRequestType:BLK_SEARCH_X;
+        }else{
+            out_msg.TypeL2 := CoherenceRequestType:BLK_SEARCH;
+        }
+        out_msg.AccessMode := in_msg.AccessMode;
+        out_msg.Prefetch := in_msg.Prefetch;
+        out_msg.Destination :=get_AllFamilyBanks(machineID);  // This function is written is RubySlicc_ComponentMapping.h.
+        out_msg.MessageSize := MessageSizeType:Control;
+     }
+   }
+ }
+ 
+ action(chmgs_checkNStartMigration_S,"chmgs",desc="Check and start migration for the block in SS state"){
+    if(isMigrationPossible(address)){
+        //insert into TLATBE.
+        if(L2_TLATBEs.isPresent(address)){
+            L2_TLATBEs[address].entryType:=TLATBEEntry:MIGRATION; // Most probably this condition will not occure.
+        }else{
+            L2_TLATBEs.allocate(address);
+            L2_TLATBEs[address].entryType:=TLATBEEntry:MIGRATION;
+        }
+        setState(address,State:SS); // This intermediate set change is very necessary before sending the block to other L2 bank.  
+        enqueue(L2RequestIntraChipL2Network_out,RequestMsgL2,latency="1"){// latency may be more than 1.
+           out_msg.Address:=address;
+           out_msg.Requestor:=machineID;
+           out_msg.Destination.add(MGRTABLE[address].lastAccess);
+           out_msg.cacheBlk:=getL2CacheEntry(address);
+           out_msg.TypeL2:=CoherenceRequestType:BLK_MIGRN;
+        }
+        // Delete from Cachememory.
+        L2cacheMemory.deallocate(address);
+        MGRTABLE.deallocate(address);
+    }
+ }
+ action(chmgm_checkNStartMigration_M,"chmgm",desc="Check and start migration for the block in M state"){
+    if(isMigrationPossible(address)){
+        if(L2_TLATBEs.isPresent(address)){
+            L2_TLATBEs[address].entryType:=TLATBEEntry:MIGRATION; // Most probably this condition will not occure.
+        }else{
+            L2_TLATBEs.allocate(address);
+            L2_TLATBEs[address].entryType:=TLATBEEntry:MIGRATION;
+        }
+        setState(address,State:M);// This intermediate set change is very necessary before sending the block to other L2 bank.
+        enqueue(L2RequestIntraChipL2Network_out,RequestMsgL2,latency="1"){
+           out_msg.Address:=address;
+           out_msg.Requestor:=machineID;
+           out_msg.Destination.add(MGRTABLE[address].lastAccess);
+           out_msg.cacheBlk:=getL2CacheEntry(address);
+           out_msg.TypeL2:=CoherenceRequestType:BLK_MIGRN;
+        }
+        // Delete from Cachememory.
+        L2cacheMemory.deallocate(address);
+        MGRTABLE.deallocate(address);
+    }
+ }
+ action(chmgmt_checkNStartMigration_MT,"chmgmt",desc="Check and start migration for the block in MT state"){
+    if(isMigrationPossible(address)){
+        if(L2_TLATBEs.isPresent(address)){
+            L2_TLATBEs[address].entryType:=TLATBEEntry:MIGRATION; // Most probably this condition will not occure.
+        }else{
+            L2_TLATBEs.allocate(address);
+            L2_TLATBEs[address].entryType:=TLATBEEntry:MIGRATION;
+        }
+        setState(address,State:MT);// This intermediate set change is very necessary before sending the block to other L2 bank.
+        enqueue(L2RequestIntraChipL2Network_out,RequestMsgL2,latency="1"){
+           out_msg.Address:=address;
+           out_msg.Requestor:=machineID;
+           out_msg.Destination.add(MGRTABLE[address].lastAccess);
+           out_msg.cacheBlk:=getL2CacheEntry(address);
+           out_msg.TypeL2:=CoherenceRequestType:BLK_MIGRN;
+        }
+        // Delete from Cachememory.
+        L2cacheMemory.deallocate(address);
+        MGRTABLE.deallocate(address);
+    }
+ }
+
+
+// This action is written for managing migration table in case of the forwarded requests arrives from other L2 banks.
+// Migration table must record (change) the request comming directly from L1 (without forwarding), but this is done L1Request input-port.  
+action(inmgt_insertIntoMigrationTable,"inmgt",desc=""){ 
+ peek(L2RequestIntraChipL2Network_in,RequestMsgL2){
+   if(MGRTABLE.isPresent(address)){
+      if(MGRTABLE[address].lastAccess==in_msg.Sender){
+          MGRTABLE[address].totalCount:=MGRTABLE[address].totalCount+1;
+      }else{
+         MGRTABLE[address].lastAccess:=in_msg.Sender;
+         MGRTABLE[address].totalCount:=1;
+      }   
+   }else{
+      MGRTABLE.allocate(address);
+      MGRTABLE[address].lastAccess:=in_msg.Sender;
+      MGRTABLE[address].totalCount:=1;
+   }
+ }
+}
+
+// *** This action is currently not in use.
+action(dlmgt_deleteFromMigrationTable,"dlmgt",desc=""){ // Action currently not in use.
+   MGRTABLE.deallocate(address);
+}
+action(invtl_insertVictimIntoTLATBE,"invtl",desc=""){
+    L2_TLATBEs.allocate(address); 
+    L2_TLATBEs[address].Address := address;
+    L2_TLATBEs[address].DataBlk := getL2CacheEntry(address).DataBlk;
+    L2_TLATBEs[address].Dirty := getL2CacheEntry(address).Dirty;
+    L2_TLATBEs[address].entryType:=TLATBEEntry:MIGRATION;
+    L2_TLATBEs[address].Sharers := getL2CacheEntry(address).Sharers;
+}
+
+action(pmgc_placeMigratedBlockIntoCache,"pmgc",desc=""){
+   peek(L2RequestIntraChipL2Network_in,RequestMsgL2){
+      L2cacheMemory.placeNewBlockInPlaceOf(in_msg.cacheBlk,address);
+   }
+}
+action(pmgc2_placeMigratedBlockIntoCache,"pmgc2",desc=""){
+   peek(L2RequestIntraChipL2Network_in,RequestMsgL2){
+      L2cacheMemory.placeNewBlockInCache(in_msg.cacheBlk);
+   }
+}
+
+action(saki_sendAckToMigrationInvoker,"saki",desc=""){
+  peek(L2RequestIntraChipL2Network_in,RequestMsgL2){
+    enqueue(L2ResponceIntraChipL2Network_out,ResponseMsgL2,latency="1"){
+       out_msg.Address:=in_msg.Address;
+       out_msg.Sender:=machineID;
+       out_msg.Destination.add(in_msg.Requestor);
+       out_msg.TypeL2:=CoherenceResponseType:MGR_DONE;
+    }
+  }
+}
+action(srd_sendReplacementDiscardedACK,"srd",desc=""){
+  peek(L2RequestIntraChipL2Network_in,RequestMsgL2){
+    enqueue(L2ResponceIntraChipL2Network_out,ResponseMsgL2,latency="1"){
+       out_msg.Address:=in_msg.Address;
+       out_msg.Sender:=machineID;
+       out_msg.Destination.add(in_msg.Requestor);
+       out_msg.TypeL2:=CoherenceResponseType:RPL_BLK_REMOVED;
+    }
+  }
+}
+action(srp_sendReplacementPlacedACK,"srp",desc=""){
+  peek(L2RequestIntraChipL2Network_in,RequestMsgL2){
+    enqueue(L2ResponceIntraChipL2Network_out,ResponseMsgL2,latency="1"){
+       out_msg.Address:=in_msg.Address;
+       out_msg.Sender:=machineID;
+       out_msg.Destination.add(in_msg.Requestor);
+       out_msg.TypeL2:=CoherenceResponseType:RPL_BLK_PLACED;
+    }
+  }
+}
+action(isor_issueOneHopeReplacement,"isor",desc=""){
+  peek(L2RequestIntraChipL2Network_in,RequestMsgL2){
+     enqueue(L2RequestIntraChipL2Network_out,RequestMsgL2,latency="1"){
+        out_msg.Address:=address;
+        out_msg.Requestor:=machineID;
+        out_msg.TypeL2:=CoherenceRequestType:BLK_CSD_RPL;
+        out_msg.cacheBlk:=getL2CacheEntry(address);
+        out_msg.lastAccessed:=L2cacheMemory.getLastAccessTime(address);
+        out_msg.counter:=1;
+        out_msg.Destination.add(in_msg.Requestor);
+        out_msg.MessageSize:=MessageSizeType:Response_Data;
+     }     
+  }
+}
+action(al2_allocateL2,"al2",desc=""){
+  L2cacheMemory.allocate(address);
+}
+action(fbf_forwardRequestedBlockToFriend,"fbf", desc="Forward requested block (from L1) to the frind L2, where the block currently resides"){
+  peek(L2ResponceIntraChipL2Network_in,ResponseMsgL2){
+     enqueue(L2ResponceIntraChipL2Network_out,ResponseMsgL2,latency="1"){ // may be latency more than 1.
+        out_msg.Requestor:=L2_TLATBEs[address].Requestor;    
+        out_msg.Sender:=machineID;
+        out_msg.Destination.add(in_msg.Sender);
+        out_msg.MessageSize:=MessageSizeType:Response_Data;
+        out_msg.Type := L2_TLATBEs[address].Type;
+        out_msg.TypeL2 := CoherenceResponseType:BLK_FW;
+        out_msg.DataBlk:=L2_TLATBEs[address].DataBlk;
+        out_msg.Prefetch:=L2_TLATBEs[address].prefetch;
+        out_msg.AccessMode:=L2_TLATBEs[address].AccessMode;
+    }
+  }
+}
+
+action(rttb_removeTLATBEEntry,"rttb","Remove TLATBE entry",desc=""){
+  L2_TLATBEs.deallocate(address); 
+}
+
+
+action(inlr_insertIntoLocalRequestQueue,"inlr",desc="Insert into local Request Queue carrying request from L1"){
+  peek(L2RequestIntraChipL2Network_in,RequestMsgL2){
+     enqueue(L1RequestIntraChipL2Network_out,RequestMsg,latency="1"){ // ***UN*** This is an unusual enqueue. Inserting for same machine.
+        out_msg.Address:=address;
+        out_msg.Type:=in_msg.Type;
+        out_msg.Requestor:=in_msg.Requestor;
+        out_msg.Destination.add(machineID);
+        out_msg.Prefetch:=in_msg.Prefetch;
+        out_msg.AccessMode:=in_msg.AccessMode;	
+        out_msg.isForwarded:=true;
+        out_msg.MessageSize:=MessageSizeType:Control;
+     }
+  }
+}
+
+action(snak_sendACKToSenderL2,"snak",desc="Send ACK to requested friend or L2"){
+   peek(L2RequestIntraChipL2Network_in,RequestMsgL2){
+     enqueue(L2ResponceIntraChipL2Network_out,ResponseMsgL2,latency="1"){
+         out_msg.Address:=address;
+         out_msg.Sender:=machineID;
+         out_msg.TypeL2:=CoherenceResponseType:BLK_FOUND;
+         out_msg.Destination.add(in_msg.Sender);
+         out_msg.MessageSize:=MessageSizeType:Control;
+     }
+   }
+}
+
+action(snbk_sendBlockACKToSenderL2,"snbk",desc="Send ACK to requested friend or L2"){
+   peek(L2RequestIntraChipL2Network_in,RequestMsgL2){
+     enqueue(L2ResponceIntraChipL2Network_out,ResponseMsgL2,latency="1"){
+         out_msg.Address:=address;
+         out_msg.TypeL2:=CoherenceResponseType:BLK_FOUND_X;
+         out_msg.Sender:=machineID;
+         out_msg.Destination.add(in_msg.Sender);
+         out_msg.MessageSize:=MessageSizeType:Control;
+     }
+   }
+}
+
+
+action(pr2_popL2RequestQueue,"pr2",desc="Pop L2toL2 Request queue"){
+    profileMsgDelay(0, L2RequestIntraChipL2Network_in.dequeue_getDelayCycles());
+}
+action(ps2_popL2ResponceQueue,"ps2", desc="Pop L2toL2 Responce queue"){
+    profileMsgDelay(0, L2ResponceIntraChipL2Network_in.dequeue_getDelayCycles());
+}
+
+
+action(bs_startBankSetSearch,"bs",desc="Bankset search."){ // Action currently not in use. Alternative action "snsr" has been written.
+     peek(L1RequestIntraChipL2Network_in, RequestMsg) {
+      enqueue(L2RequestIntraChipL2Network_out, RequestMsgL2, latency="1") { 
+        out_msg.Address := address;
+        out_msg.Type:= in_msg.Type;
+        out_msg.TypeL2 := CoherenceRequestType:BLK_SEARCH;
+        out_msg.Sender := machineID;
+        out_msg.Requestor:=in_msg.Requestor;
+        out_msg.Destination := get_AllFamilyBanks(machineID);
+        out_msg.MessageSize := MessageSizeType:Control;
+      }
+    }
+  }
+action(bsx_startBankSetSearch_X,"bsx",desc="Bankset search."){ // Action currently not in use. Alternative action "snsr" has been written.
+     peek(L1RequestIntraChipL2Network_in, RequestMsg) {
+      enqueue(L2RequestIntraChipL2Network_out, RequestMsgL2, latency="1") {
+        out_msg.Address := address;
+        out_msg.Type:= in_msg.Type;
+        out_msg.TypeL2 := CoherenceRequestType:BLK_SEARCH_X;
+        out_msg.Sender := machineID;
+        out_msg.Requestor:=in_msg.Requestor;
+        out_msg.Destination := get_AllFamilyBanks(machineID);
+        out_msg.MessageSize := MessageSizeType:Control;
+      }
+    }
+  }
+
+
+  action(itla_allocateTLATBE,"itla",desc="Bankset search."){ // Action currently not in use. 
+    peek(L1RequestIntraChipL2Network_in, RequestMsg) {
+      check_allocate(L2_TLATBEs);
+      L2_TLATBEs.allocate(address);
+      L2_TLATBEs[address].DataBlk := in_msg.DataBlk;
+      L2_TLATBEs[address].Type :=in_msg.Type;
+      L2_TLATBEs[address].Requestor :=in_msg.Requestor;
+      L2_TLATBEs[address].pendingAcks :=get_BanksetSize()-1;
+    }
+  }
+  action(snnk_sendNAKToSenderL2,"snnk",desc="Send NACK to Sender L2"){
+      peek(L2RequestIntraChipL2Network_in,RequestMsgL2){
+         enqueue(L2ResponceIntraChipL2Network_out,ResponseMsgL2, latency="1"){
+            out_msg.Address:=address;
+            out_msg.Sender:=machineID;
+            out_msg.Destination.add(in_msg.Sender); // It must be "in_msg.Sender" as "in_msg.Requestor" is carrying original requestor (L1).
+            out_msg.TypeL2:=CoherenceResponseType:BLK_NOT_FOUND;
+            out_msg.MessageSize := MessageSizeType:Control;
+         }
+      }
+  }
+  action(srnk_sendRemovedNAKToSenderL2,"srnk",desc="Send Block Removed information to sender L2"){
+      peek(L2RequestIntraChipL2Network_in,RequestMsgL2){
+         enqueue(L2ResponceIntraChipL2Network_out,ResponseMsgL2, latency="1"){
+            out_msg.Address:=address;
+            out_msg.Sender:=machineID;
+            out_msg.Destination.add(in_msg.Sender); // It must be "in_msg.Sender" as "in_msg.Requestor" is carrying original requestor (L1).
+            out_msg.TypeL2:=CoherenceResponseType:BLK_REMOVED;
+            out_msg.MessageSize := MessageSizeType:Control;
+         }
+      }
+  }
+  action(smnk_sendMigrationNAKToSenderL2,"smnk",desc=""){
+      peek(L2RequestIntraChipL2Network_in,RequestMsgL2){
+         enqueue(L2ResponceIntraChipL2Network_out,ResponseMsgL2, latency="1"){
+            out_msg.Address:=address;
+            out_msg.Sender:=machineID;
+            out_msg.Destination.add(in_msg.Sender);
+            out_msg.TypeL2:=CoherenceResponseType:UNDER_MGR;
+            out_msg.MessageSize := MessageSizeType:Control;
+         }
+      }
+  }
+
+  action(rirm_reinsertRequestMessageToL1RequestQueue,"rirm",desc="Reinsert request to L1 request queue"){
+     enqueue(L1RequestIntraChipL2Network_out,RequestMsg,latency="1"){ // ****UN**** Inserting for same machine.
+         out_msg.Address:=address;
+         out_msg.Destination.add(machineID);
+         out_msg.Type:=L2_TLATBEs[address].Type;
+         out_msg.Requestor:=L2_TLATBEs[address].Requestor;
+         out_msg.Prefetch:=L2_TLATBEs[address].prefetch;
+         out_msg.AccessMode:=L2_TLATBEs[address].AccessMode;
+         if(isL1CacheWriteRequest(L2_TLATBEs[address].Type)){
+            out_msg.DataBlk:=L2_TLATBEs[address].DataBlk;
+         }
+         out_msg.MessageSize:=MessageSizeType:Control; // Inter tile communication, so no need to consider the datablock routing.
+         out_msg.isForwarded:=false;
+     }
+  }
+
+  action(dsak_decrementSearchACK,"dsak",desc="Decrement the pending acks of block search"){
+     if(L2_TBEs.isPresent(address)){
+        L2_TLATBEs[address].pendingAcks := L2_TLATBEs[address].pendingAcks-1;
+     }
+  } 
+  action(sbum_setTheBlockAsUnderMigration,"sbum", desc="Set the requested block as under migration"){
+     if(L2_TLATBEs.isPresent(address)){
+        L2_TLATBEs[address].isUnderMigration:=true;
+     }
+  }	
+  action(atbtl_allocateTBEfromTLATBE, "atbl", desc="Allocate TBE (from TLATBE) for  internal/external request(isPrefetch=0, number of invalidates=0)") {
+    check_allocate(L2_TBEs);
+    L2_TBEs.allocate(address);
+    L2_TBEs[address].L1_GetS_IDs.clear();
+    L2_TBEs[address].DataBlk := L2_TLATBEs[address].DataBlk;
+    L2_TBEs[address].Dirty := L2_TLATBEs[address].Dirty;
+    L2_TBEs[address].pendingAcks := L2_TLATBEs[address].Sharers.count();
+  }
+
+  action(ertl_exclusiveReplacementFromTLATBE, "ertl", desc="Send data to memory") {
+    enqueue(responseIntraChipL2Network_out, ResponseMsg, latency="L2_RESPONSE_LATENCY") {
+      out_msg.Address := address;
+      out_msg.Type := CoherenceResponseType:MEMORY_DATA;
+      out_msg.Sender := machineID;
+      out_msg.Destination.add(map_Address_to_Directory(address));
+      out_msg.DataBlk := L2_TLATBEs[address].DataBlk;
+      out_msg.Dirty := L2_TLATBEs[address].Dirty;
+      out_msg.MessageSize := MessageSizeType:Response_Data;
+    }
+  }
+
+ action(srfr_sendReplacedBlockToFrinds,"srfr",desc="Send Victim Block to friend"){
+    enqueue(L2RequestIntraChipL2Network_out,RequestMsgL2,latency="1"){ // latency may be more than 1.
+        out_msg.Address:=address;
+        out_msg.Requestor:=machineID;
+        out_msg.TypeL2:=CoherenceRequestType:BLK_CSD_RPL;
+        out_msg.cacheBlk:= getL2CacheEntry(address);
+        out_msg.lastAccessed:=L2cacheMemory.getLastAccessTime(address);
+        out_msg.counter:=get_CascadingRelacementCount(); // Function written in slicc component mapping.
+        out_msg.Destination:=get_CascadingNeighbour(machineID); // Function written in slicc component mapping.
+        out_msg.MessageSize:=MessageSizeType:Response_Data;
+    }
+ }  
+ action(fwd_forwardBlockToNextFriend,"fwd",desc=""){
+    peek(L2RequestIntraChipL2Network_in,RequestMsgL2){
+      enqueue(L2RequestIntraChipL2Network_out,RequestMsgL2,latency="1"){// latency may be more than 1.
+          out_msg.Address:=address;
+          out_msg.Requestor:=machineID;
+          out_msg.TypeL2:=CoherenceRequestType:BLK_CSD_RPL;
+          out_msg.cacheBlk:= in_msg.cacheBlk;
+          out_msg.lastAccessed:=in_msg.lastAccessed;
+          out_msg.counter:=in_msg.counter-1; 
+          out_msg.Destination:=get_CascadingNeighbour(machineID); // Function written in slicc component mapping.
+          out_msg.MessageSize:=MessageSizeType:Response_Data;
+      }
+   }
+ }  
+ action(srnf_sendReplacedBlockToNextFrinds,"srnf",desc=""){
+    peek(L2RequestIntraChipL2Network_in,RequestMsgL2){
+        enqueue(L2RequestIntraChipL2Network_out,RequestMsgL2,latency="1"){// latency may be more than 1.
+           out_msg.Address:=address;
+           out_msg.Requestor:=machineID;
+           out_msg.TypeL2:=CoherenceRequestType:BLK_CSD_RPL;
+           out_msg.cacheBlk:= getL2CacheEntry(address);
+           out_msg.lastAccessed:=L2cacheMemory.getLastAccessTime(address);
+           out_msg.counter:=in_msg.counter-1; // 
+           out_msg.Destination:=get_CascadingNeighbour(machineID); // Function written in slicc component mapping.
+           out_msg.MessageSize:=MessageSizeType:Response_Data;
+        }
+    }
+ }  
+
+  action(inltb_insertIntoLockTable,"inltb",desc="Insert/Increment lock table"){
+     increamentLOCKTABLE(address);
+  }
+
+  action(dltb_deleteFromLockTab,"dltb",desc="Detele/decrement lock table"){
+     decrementLOCKTABLE(address);
+  }
+
+  action(s_deallocateTBE, "s", desc="Deallocate external TBE") {
+    L2_TBEs.deallocate(address);
+  }
+
+  action(ssx_recordGetSL1ID, "ssx", desc="Record L1 GetS from TLATBE for load response") {
+     L2_TBEs[address].L1_GetS_IDs.add(L2_TLATBEs[address].Requestor);
+  }
+  action(xxx_recordGetXL1ID, "xxx", desc="Record L1 GetX for store response") {
+    L2_TBEs[address].L1_GetX_ID := L2_TLATBEs[address].Requestor;
+  }
+
+
+
+  action(rr_deallocateL2CacheBlock, "\r", desc="Deallocate L2 cache block.  Sets the cache to not present, allowing a replacement in parallel with a fetch.") {
+    if(isMigrationAllowed() && MGRTABLE.isPresent(address)){
+       MGRTABLE.deallocate(address);
+    }
+    L2cacheMemory.deallocate(address);
+  }
+
+
+
+  action(uux_profileMiss, "ux", desc="Profile the demand miss") {
+    profile_L2Cache_miss(convertToGenericType(L2_TLATBEs[address].Type), L2_TLATBEs[address].AccessMode, MessageSizeTypeToInt(MessageSizeType:Control), L2_TLATBEs[address].prefetch, L1CacheMachIDToProcessorNum(L2_TLATBEs[address].Requestor));
+  }
+
+  action(llx_clearSharers, "llx", desc="Remove all L1 sharers from list") {
+      L2cacheMemory[address].Sharers.clear();
+  }
+
+  action(tx_sendForwarededWBAck, "tx", desc="Send writeback ACK for forwarded write request") {
+    peek(L2ResponceIntraChipL2Network_in, RequestMsgL2) {
+      enqueue(responseIntraChipL2Network_out, ResponseMsg, latency="1") {
+        out_msg.Address := address;
+        out_msg.Type := CoherenceResponseType:WB_ACK;
+        out_msg.Sender := machineID;
+        out_msg.Destination.add(in_msg.Requestor);
+        out_msg.MessageSize := MessageSizeType:Response_Control;
+      }
+    }
+  }
+  action(nnx_addSharer, "nx", desc="Add L1 sharer to list from TLATBE") {
+      addSharer(address, L2_TLATBEs[address].Requestor);
+      APPEND_TRANSITION_COMMENT( getL2CacheEntry(address).Sharers );
+  }
+  action(mrx_writeDataToCacheFromL2Responce, "mrx", desc="Write data from  L2 response queue to cache") {
+    peek(L2ResponceIntraChipL2Network_in, RequestMsgL2) {
+      getL2CacheEntry(address).DataBlk := in_msg.DataBlk;
+      getL2CacheEntry(address).Dirty := in_msg.Dirty;
+    }
+  }
+
+ action(setr_setMRUFromRequestQueue, "setr", desc="set the MRU entry") {
+     peek(L2RequestIntraChipL2Network_in,RequestMsgL2){
+       L2cacheMemory.setMRU(in_msg.Address);
+     }
+  }
+ action(slru_setLRU, "slru", desc="set the LRU entry") {
+     peek(L2RequestIntraChipL2Network_in,RequestMsgL2){
+       L2cacheMemory.setLRU(in_msg.Address);
+     }
+  }
+  action(zzr_recycleL2RequestQueue, "zzr", desc="recycle L2 request queue") {
+    L2RequestIntraChipL2Network_in.recycle();
+  }
+  action(zzs_recycleL2ResponceQueue, "zzs", desc="recycle L2 responce queue") {
+    L2ResponceIntraChipL2Network_in.recycle();
+  }
+  // ************************************************************************
+  //         END OF DTLA ACTIONS 
+  // ***************************************************************************
+
+  
+
+  // ********************************************************************************
+  // (T) : TRANSITIONS
+  // ******************************************************************************
+  // BASE STATE - I
+
+  // Transitions from I (Idle)
+  transition({NP, IS, ISS, IM, SS, M, M_I, MT_I, MCT_I, I_I, S_I, SS_MB, M_MB, MT_IIB, MT_IB, MT_SB}, L1_PUTX) {
+    jj_popL1RequestQueue;
+  }
+
+  transition({NP, SS, M, MT, M_I, MT_I, MCT_I, I_I, S_I, IS, ISS, IM, SS_MB, MT_MB, M_MB, MT_IIB, MT_IB, MT_SB}, L1_PUTX_old) {
+    jj_popL1RequestQueue;
+  }
+
+  //This transition may not be necessary, because another transition on event "IN_TLATBE" is also given. After reaching
+  // L1 request (direct or forward) it first check for the entry in TLATBE, if present then call for the transition "IN_TLATBE".   
+  transition({SS_UR,M_UR,MT_UR},{L1_GETX, L1_UPGRADE, L1_GETS, L1_GET_INSTR}){ 
+    zz_recycleL1RequestQueue;   // No POP for PUTX coz the block may not be removed from the cache and only moved to another bank.
+  }
+
+  transition({IM, IS, ISS, SS_MB, M_MB, MT_MB, MT_IIB, MT_IB, MT_SB}, {L2_Replacement, L2_Replacement_clean}) {
+    // zz_recycleL1RequestQueue;  // Commented for DTLA, coz now replacement is calling after getting responce.
+    zzs_recycleL2ResponceQueue; 
+  }
+
+  transition({SS_MB, M_MB, MT_MB, MT_IIB, MT_IB, MT_SB}, {L1_GETS, L1_GET_INSTR, L1_GETX, L1_UPGRADE}) {
+    zz_recycleL1RequestQueue;
+  }
+
+  transition(NP, L1_GETS,  ISS) { // This transition may not be triggered now, but I am not fully sure. The miss will only issue once BS searching -
+    qq_allocateL2CacheBlock;      // - finished and then bellow transition (L1_GET_X) should call.
+    ll_clearSharers;
+    nn_addSharer;
+    i_allocateTBE;
+    ss_recordGetSL1ID;
+    a_issueFetchToMemory;
+    uu_profileMiss;
+    jj_popL1RequestQueue;
+  }
+
+  transition(NP, L1_GET_INSTR, IS) {
+    qq_allocateL2CacheBlock;
+    ll_clearSharers;
+    nn_addSharer;
+    i_allocateTBE;
+    ss_recordGetSL1ID;
+    a_issueFetchToMemory;
+    uu_profileMiss;
+    jj_popL1RequestQueue;
+  }
+
+  transition(NP, L1_GETX, IM) {  
+    qq_allocateL2CacheBlock;
+    ll_clearSharers;
+    // nn_addSharer;
+    i_allocateTBE;
+    xx_recordGetXL1ID;
+    a_issueFetchToMemory;
+    uu_profileMiss;
+    jj_popL1RequestQueue;
+  }
+
+
+  // transitions from IS/IM
+  transition(ISS, Mem_Data, MT_MB) {
+    m_writeDataToCache;
+    ex_sendExclusiveDataToGetSRequestors;
+    s_deallocateTBE;
+    o_popIncomingResponseQueue;
+  }
+
+  transition(IS, Mem_Data, SS) {
+    m_writeDataToCache;
+    e_sendDataToGetSRequestors;
+    s_deallocateTBE;
+    o_popIncomingResponseQueue;
+  }
+
+  transition(IM, Mem_Data, MT_MB) {
+    m_writeDataToCache;
+    ee_sendDataToGetXRequestor;
+    s_deallocateTBE;
+    o_popIncomingResponseQueue;
+  }
+
+  transition({IS, ISS}, {L1_GETS, L1_GET_INSTR}, IS) {
+    nn_addSharer;
+    ss_recordGetSL1ID;
+    //uu_profileMiss;
+    jj_popL1RequestQueue;
+  }
+
+  transition({IS, ISS}, L1_GETX) {
+    zz_recycleL1RequestQueue;
+  }
+
+  transition(IM, {L1_GETX, L1_GETS, L1_GET_INSTR}) {
+    zz_recycleL1RequestQueue;
+  }
+
+  // transitions from SS
+  transition(SS, {L1_GETS, L1_GET_INSTR}) {
+    ds_sendSharedDataToRequestor;
+    nn_addSharer;
+    //uu_profileMiss;
+    chmgs_checkNStartMigration_S;
+    set_setMRU;
+    jj_popL1RequestQueue;
+  }
+
+
+  transition(SS, L1_GETX, SS_MB) {
+    d_sendDataToRequestor;
+    // fw_sendFwdInvToSharers;
+    fwm_sendFwdInvToSharersMinusRequestor;
+    //uu_profileMiss;
+    set_setMRU;
+    jj_popL1RequestQueue;
+  }
+
+  transition(SS, L1_UPGRADE, SS_MB) {
+    fwm_sendFwdInvToSharersMinusRequestor;
+    ts_sendInvAckToUpgrader;
+    //uu_profileMiss;
+    set_setMRU;
+    jj_popL1RequestQueue;
+  }
+   
+  transition(M, L1_GETX, MT_MB) {
+    d_sendDataToRequestor;
+    //uu_profileMiss;
+    set_setMRU;
+    jj_popL1RequestQueue;
+  }
+
+  transition(M, L1_GET_INSTR, SS) {
+    d_sendDataToRequestor;
+    nn_addSharer;
+    //uu_profileMiss;
+    chmgs_checkNStartMigration_S;
+    set_setMRU;
+    jj_popL1RequestQueue;
+  }
+
+  transition(M, L1_GETS, MT_MB) {
+    dd_sendExclusiveDataToRequestor;
+    //uu_profileMiss;
+    set_setMRU;
+    jj_popL1RequestQueue;
+  }
+
+  // transitions from MT
+  transition(MT, L1_GETX, MT_MB) {
+    b_forwardRequestToExclusive;
+    //uu_profileMiss;
+    set_setMRU;
+    jj_popL1RequestQueue;
+  }
+
+
+  transition(MT, {L1_GETS, L1_GET_INSTR}, MT_IIB) {
+    b_forwardRequestToExclusive;
+    //uu_profileMiss;
+    set_setMRU;
+    jj_popL1RequestQueue;
+  }
+
+  transition(MT, L1_PUTX, M) {
+    ll_clearSharers;
+    mr_writeDataToCacheFromRequest;
+    t_sendWBAck;
+    chmgm_checkNStartMigration_M;
+    jj_popL1RequestQueue;
+  }
+
+
+  // transitions from blocking states
+  transition(SS_MB, Unblock_Cancel, SS) {
+    chmgs_checkNStartMigration_S;
+    k_popUnblockQueue;
+  }
+
+  transition(MT_MB, Unblock_Cancel, MT) {
+    chmgmt_checkNStartMigration_MT;
+    k_popUnblockQueue;
+  }
+  transition(MT_IB, Unblock_Cancel, MT) {
+    chmgmt_checkNStartMigration_MT;
+    k_popUnblockQueue;
+  }
+
+  transition(SS_MB, Exclusive_Unblock, MT) {
+    // update actual directory
+    mmu_markExclusiveFromUnblock;
+    chmgmt_checkNStartMigration_MT;
+    k_popUnblockQueue;
+  }
+
+  transition({M_MB, MT_MB}, Exclusive_Unblock, MT) {
+    // update actual directory
+    mmu_markExclusiveFromUnblock;
+    chmgmt_checkNStartMigration_MT;
+    k_popUnblockQueue;
+  }
+
+  transition(MT_IIB, Unblock, MT_IB) {
+    nnu_addSharerFromUnblock;
+    k_popUnblockQueue;
+  }
+
+  transition(MT_IIB, {WB_Data, WB_Data_clean}, MT_SB) {
+    m_writeDataToCache;
+    o_popIncomingResponseQueue;
+  }
+
+  transition(MT_IB, {WB_Data, WB_Data_clean}, SS) {
+    m_writeDataToCache;
+    o_popIncomingResponseQueue;
+  }
+
+  transition(MT_SB, Unblock, SS) {
+    nnu_addSharerFromUnblock;
+    chmgs_checkNStartMigration_S;
+    k_popUnblockQueue;
+  }
+
+  // writeback states
+  transition({I_I, S_I, MT_I, MCT_I, M_I}, {L1_GETX, L1_UPGRADE, L1_GETS, L1_GET_INSTR}) {
+    zz_recycleL1RequestQueue;
+  }
+
+  transition(I_I, Ack) {
+    q_updateAck;
+    o_popIncomingResponseQueue;
+  }
+
+  transition(I_I, Ack_all, NP) {
+    s_deallocateTBE;
+    o_popIncomingResponseQueue;
+  }
+
+  transition({MT_I, MCT_I}, WB_Data, M_I) {
+    qq_writeDataToTBE;
+    ct_exclusiveReplacementFromTBE;
+    o_popIncomingResponseQueue;
+  }
+  
+  transition(MCT_I, WB_Data_clean, NP) {
+    s_deallocateTBE;
+    o_popIncomingResponseQueue;
+  }
+  
+  // L1 never changed Dirty data
+  transition(MT_I, Ack_all, M_I) {
+    ct_exclusiveReplacementFromTBE;
+    o_popIncomingResponseQueue;
+  }
+
+  // clean data that L1 exclusive never wrote
+  transition(MCT_I, Ack_all, NP) {
+    s_deallocateTBE;
+    o_popIncomingResponseQueue;
+  }
+
+  // drop this because L1 will send data again
+  //  the reason we don't accept is that the request virtual network may be completely backed up
+  // transition(MT_I, L1_PUTX) {
+  //   jj_popL1RequestQueue;
+  //}
+
+  // possible race between unblock and immediate replacement
+  transition(MT_MB, L1_PUTX) {
+    zz_recycleL1RequestQueue;
+  }
+
+  transition(MT_I, WB_Data_clean, NP) {
+    s_deallocateTBE;
+    o_popIncomingResponseQueue;
+  }
+
+  transition(S_I, Ack) {
+    q_updateAck;
+    o_popIncomingResponseQueue;
+  }
+
+  transition(S_I, Ack_all, M_I) {
+    ct_exclusiveReplacementFromTBE;
+    o_popIncomingResponseQueue;
+  }
+
+  transition(M_I, Mem_Ack, NP) {
+    s_deallocateTBE;
+    o_popIncomingResponseQueue;
+  }
+  
+  // ***********************************************************************************
+  // DTLA----- Transitions added (By Shirshendu Das) for implementing DTLA..
+  // ************************************************************************************
+  transition(NP, L1_GET_INSTR_X, IS) {
+    qq_allocateL2CacheBlock;
+    llx_clearSharers;
+    nnx_addSharer;
+    i_allocateTBE;
+    ssx_recordGetSL1ID;
+    ax_issueFetchToMemory;
+    uux_profileMiss;
+    //jj_popL1RequestQueue;
+    rttb_removeTLATBEEntry;
+    ps2_popL2ResponceQueue;
+  }
+
+  transition(NP, L1_GETS_X,  ISS) { // This transition is required because in case of DTLA, when the miss occures the request may be stored in TLATBE and not in queue. 
+    qq_allocateL2CacheBlock;
+    llx_clearSharers;  // any action rewritten with x are for the TLATBE. 
+    nnx_addSharer;
+    i_allocateTBE;
+    ssx_recordGetSL1ID;
+    ax_issueFetchToMemory;
+    uux_profileMiss;
+    // jj_popL1RequestQueue;
+    rttb_removeTLATBEEntry;
+    ps2_popL2ResponceQueue;
+  }
+
+  transition(NP, L1_GETX_X, IM) {  
+    qq_allocateL2CacheBlock;
+    llx_clearSharers;
+    // nn_addSharer;
+    i_allocateTBE;
+    xxx_recordGetXL1ID;
+    ax_issueFetchToMemory;
+    uux_profileMiss;
+    // jj_popL1RequestQueue;
+    rttb_removeTLATBEEntry;
+    ps2_popL2ResponceQueue;
+  }
+   
+  // ***************REPLACEMENT RELATED TRANSITIONS ******************************************************
+  transition(SS, L2_Replacement_clean, I_I) {
+    i_allocateTBE;
+    f_sendInvToSharers;
+    rr_deallocateL2CacheBlock;
+  }
+
+  transition(SS, L2_Replacement, S_I) {
+    i_allocateTBE;
+    f_sendInvToSharers;
+    rr_deallocateL2CacheBlock;
+  }
+  
+  transition(M, L2_Replacement, M_I) {
+    i_allocateTBE;
+    c_exclusiveReplacement;
+    rr_deallocateL2CacheBlock;
+  }
+
+  transition(M, L2_Replacement_clean, M_I) {
+    rr_deallocateL2CacheBlock;
+  }
+  
+  transition(MT, L2_Replacement, MT_I) {
+    i_allocateTBE;
+    f_sendInvToSharers;
+    rr_deallocateL2CacheBlock;
+  }
+
+  transition(MT, L2_Replacement_clean, MCT_I) {
+    i_allocateTBE;
+    f_sendInvToSharers;
+    rr_deallocateL2CacheBlock;
+  }
+
+  transition(SS, L2_CSD_Replacement, SS_UR) {
+    attbr_allocateTLATBE_replace;
+    srfr_sendReplacedBlockToFrinds;  // all banks within a bank set are friends :) .
+    rr_deallocateL2CacheBlock;
+  }
+  transition(M, L2_CSD_Replacement, M_UR) {
+    attbr_allocateTLATBE_replace;
+    srfr_sendReplacedBlockToFrinds;  // all banks within a bank set are friends :) .
+    rr_deallocateL2CacheBlock;
+  }
+  transition(MT, L2_CSD_Replacement, MT_UR) {
+    attbr_allocateTLATBE_replace;
+    srfr_sendReplacedBlockToFrinds;  // all banks within a bank set are friends :) .
+    rr_deallocateL2CacheBlock;
+  }
+  transition({IM, IS, ISS, SS_MB, M_MB, MT_MB, MT_IIB, MT_IB, MT_SB},L2_CSD_Replacement){ 
+     // Other state cannot occure, as other state are not the CacheMemory state. The blocks only resides in TBE or TLATBE can have such states. 
+     zzs_recycleL2ResponceQueue; 
+  }  
+
+  transition({NP,SS_UR,M_UR,MT_UR},BLK_Moved2Friend,NP){ // initial "NP" state is may not be necessary here. As the block in TLATBE will be in _UR state.
+     rttb_removeTLATBEEntry;                             // I added NP only if the block from TLATBE got deleted previously. But it should be deleted previously. 
+  }
+   
+  transition(SS_UR, L2_Replacement_clean, I_I) {
+    atbtl_allocateTBEfromTLATBE;
+    sitl_sendInvToSharersfromTLATBE;
+    rttb_removeTLATBEEntry;
+  }
+
+  transition(SS_UR, L2_Replacement, S_I) {
+    atbtl_allocateTBEfromTLATBE;
+    sitl_sendInvToSharersfromTLATBE;
+    rttb_removeTLATBEEntry;
+  }
+  
+  transition(M_UR, L2_Replacement, M_I) {
+    atbtl_allocateTBEfromTLATBE;
+    // c_exclusiveReplacementfromTLATBE;
+    ertl_exclusiveReplacementFromTLATBE;
+    rttb_removeTLATBEEntry;
+  }
+
+  transition(M_UR, L2_Replacement_clean, M_I) {
+    rttb_removeTLATBEEntry;
+  }
+  
+  transition(MT_UR, L2_Replacement, MT_I) {
+    atbtl_allocateTBEfromTLATBE;
+    sitl_sendInvToSharersfromTLATBE;
+    rttb_removeTLATBEEntry;
+  }
+
+  transition(MT_UR, L2_Replacement_clean, MCT_I) {
+    atbtl_allocateTBEfromTLATBE;
+    sitl_sendInvToSharersfromTLATBE;
+    rttb_removeTLATBEEntry;
+  }
+  transition(NP,DISCARD_BLK){
+    srd_sendReplacementDiscardedACK; 
+    pr2_popL2RequestQueue;
+  }
+
+  transition(NP,FWD_RPL){
+    fwd_forwardBlockToNextFriend;
+    pr2_popL2RequestQueue;
+  }
+
+  // The following three transitions (CSD_RPL_AM, CSD_RPL_AMT and CSD_RPL_AS) are same and they only re-written for setting the final cache state different.
+  // The initial state will be NP as the block is not currently in this L2 bank and the address passing to the transition is the address of the newly arrived
+  // block and not the victime block of the local L2 bank.
+  // For more go to the L2Request input-port section (in this file) to understand why and when such transitions triggers.
+  transition(NP, CSD_RPL_AM, M) {  
+    pmgc2_placeMigratedBlockIntoCache;
+    srp_sendReplacementPlacedACK;
+    slru_setLRU;
+    pr2_popL2RequestQueue;
+  }
+  transition(NP, CSD_RPL_AMT, MT) {
+    pmgc2_placeMigratedBlockIntoCache;
+    srp_sendReplacementPlacedACK;
+    slru_setLRU;
+    pr2_popL2RequestQueue;
+  }
+  transition(NP, CSD_RPL_AS, SS) {
+    pmgc2_placeMigratedBlockIntoCache;
+    srp_sendReplacementPlacedACK;
+    slru_setLRU;
+    pr2_popL2RequestQueue;
+  }
+
+  transition(SS, CSD_RPL_clean, I_I) {
+    i_allocateTBE;
+    f_sendInvToSharers;
+    pmgc_placeMigratedBlockIntoCache; // This action is written for migration but works for replacement tooo. :) :) 
+    srp_sendReplacementPlacedACK;
+    slru_setLRU;
+    pr2_popL2RequestQueue;
+  }
+
+  transition(SS, CSD_RPL, S_I) {
+    i_allocateTBE;
+    f_sendInvToSharers;
+    pmgc_placeMigratedBlockIntoCache;
+    srp_sendReplacementPlacedACK;
+    slru_setLRU;
+    pr2_popL2RequestQueue;
+  }
+  
+  transition(M, CSD_RPL, M_I) {
+    i_allocateTBE;
+    c_exclusiveReplacement;
+    pmgc_placeMigratedBlockIntoCache;
+    srp_sendReplacementPlacedACK;
+    slru_setLRU;
+    pr2_popL2RequestQueue;
+  }
+
+  transition(M, CSD_RPL_clean, M_I) {
+    pmgc_placeMigratedBlockIntoCache;
+    srp_sendReplacementPlacedACK;
+    slru_setLRU;
+    pr2_popL2RequestQueue;
+  }
+  
+  transition(MT, CSD_RPL, MT_I) {
+    i_allocateTBE;
+    f_sendInvToSharers;
+    pmgc_placeMigratedBlockIntoCache;
+    srp_sendReplacementPlacedACK;
+    slru_setLRU;
+    pr2_popL2RequestQueue;
+  }
+
+  transition(MT, CSD_RPL_clean, MCT_I) {
+    i_allocateTBE;
+    f_sendInvToSharers;
+    pmgc_placeMigratedBlockIntoCache;
+    srp_sendReplacementPlacedACK;
+    slru_setLRU;
+    pr2_popL2RequestQueue;
+  }
+  
+  transition({IM, IS, ISS, SS_MB, M_MB, MT_MB, MT_IIB, MT_IB, MT_SB},{CSD_RPL,CSD_RPL_clean}){
+      zzr_recycleL2RequestQueue; 
+  }
+
+  transition(SS, R_CSD_RPL, SS_UR) {
+    attbr_allocateTLATBE_replace;
+    // atbrs_allocateTLATBE_Request_replace;
+    srnf_sendReplacedBlockToNextFrinds;  // all banks within a bank set are friends :).
+    pmgc_placeMigratedBlockIntoCache;
+    srp_sendReplacementPlacedACK;
+    slru_setLRU;
+    pr2_popL2RequestQueue;
+  }
+  transition(M, R_CSD_RPL, M_UR) {
+    attbr_allocateTLATBE_replace;
+    //atbrs_allocateTLATBE_Request_replace;
+    srnf_sendReplacedBlockToNextFrinds;  // all banks within a bank set are friends :).
+    pmgc_placeMigratedBlockIntoCache;
+    srp_sendReplacementPlacedACK;
+    slru_setLRU;
+    pr2_popL2RequestQueue;
+  }
+  transition(MT, R_CSD_RPL, MT_UR) {
+    attbr_allocateTLATBE_replace;
+    //atbrs_allocateTLATBE_Request_replace;
+    srnf_sendReplacedBlockToNextFrinds;  // all banks within a bank set are friends :).
+    pmgc_placeMigratedBlockIntoCache;
+    srp_sendReplacementPlacedACK;
+    slru_setLRU;
+    pr2_popL2RequestQueue;
+  }
+  transition({IM, IS, ISS, SS_MB, M_MB, MT_MB, MT_IIB, MT_IB, MT_SB},R_CSD_RPL){ 
+     zzr_recycleL2RequestQueue;
+  }  
+  // **************END OF REPLACEMENT RELATED TRANSITIONS ****************************
+
+
+  transition({TS,SS_UR,MT_UR,M_UR,SS_UM,M_UM,MT_UM},{IN_TLATBE,L1_PUTX,L1_PUTX_old}){
+    zz_recycleL1RequestQueue;
+  }
+
+
+  // ************** MIGRATION RELATED TRANSITIONS *****************************************
+  transition({SS_UM,MT_UM,M_UM},MGR_DONE,NP){
+    //L2_TLATBEs.deallocate(in_msg.Address);
+    rttb_removeTLATBEEntry;
+    ps2_popL2ResponceQueue;
+  }
+  transition(NP,MGR_DONE){ // In case the block got deleted from TLATBE while the migration done reponce arrives. (Rear case). 
+    ps2_popL2ResponceQueue;
+  }
+  transition({SS,MT,M},MIGRATE_P){
+     al2_allocateL2;
+     pmgc_placeMigratedBlockIntoCache;
+     saki_sendAckToMigrationInvoker;
+     set_setMRU;
+     pr2_popL2RequestQueue;
+  }
+  transition({SS,M,MT},MIGRATE_R){
+     invtl_insertVictimIntoTLATBE;
+     isor_issueOneHopeReplacement;  // This command must be before "pmgc", otherwise the correcponding action will send wrong block.
+     pmgc_placeMigratedBlockIntoCache;
+     saki_sendAckToMigrationInvoker;
+     setr_setMRUFromRequestQueue;
+     pr2_popL2RequestQueue;  
+  }
+  // ****************** END OF MIGRATION RELATED TRANSITIONS **********************************
+
+
+  // **************** SEARCH RELATED TRANSITIONS **********************************************   
+  transition(NP,BS_Search,TS){
+    attbs_allocateTLATBE_Search;
+    snsr_sendSearchRequestToFriends;
+    jj_popL1RequestQueue;
+  }
+  
+  transition(TS,BLK_EXT,NP){
+     rttb_removeTLATBEEntry;
+     ps2_popL2ResponceQueue;
+  }
+  transition(NP,BLK_EXT){ // In case TLATBE entry deleted-- a rear case. Also m not sure as such casese will ever occure or not.
+    ps2_popL2ResponceQueue;
+  }
+
+  transition({SS,MT,M,IM, IS, ISS, SS_MB, M_MB, MT_MB, MT_IIB, MT_IB, MT_SB},FWD_RQST){
+     inltb_insertIntoLockTable;
+     set_setMRU; // This is important and necessary as the block is currently locked for replacement and migration.
+     inlr_insertIntoLocalRequestQueue; // insert into input queue and not output queue.
+     inmgt_insertIntoMigrationTable;
+     snak_sendACKToSenderL2;
+     pr2_popL2RequestQueue;
+  }
+  
+  transition({NP,TS},BLK_NFND){
+    snnk_sendNAKToSenderL2;
+    pr2_popL2RequestQueue;
+  }
+  transition({M_I,MCT_I,MT_I,I_I,S_I},BLK_NFND){ // If a block is under pre_replacement process. i.e. the block is deleted from cache and now only satyes in TBE.
+    srnk_sendRemovedNAKToSenderL2;
+    pr2_popL2RequestQueue;
+  }
+  transition({TS,SS_UR,SS_UM,MT_UR,MT_UM,M_UR,M_UM},BLK_BUSY){
+     smnk_sendMigrationNAKToSenderL2;
+     pr2_popL2RequestQueue;
+  }
+
+  transition(TS,{TLA_ACKALL_UM,BLK_UNDER_RPL},NP){
+     rirm_reinsertRequestMessageToL1RequestQueue;
+     rttb_removeTLATBEEntry;
+     ps2_popL2ResponceQueue;
+  }
+  transition(TS,TLA_ACK){
+     dsak_decrementSearchACK;
+     ps2_popL2ResponceQueue;
+  }
+  transition(NP,IGNR_RESPONCE){
+     ps2_popL2ResponceQueue;
+  }
+  transition(TS,UNDER_MGR){
+     sbum_setTheBlockAsUnderMigration;
+     dsak_decrementSearchACK;
+     ps2_popL2ResponceQueue;
+  }
+
+  // Transitions for block search for data write back request from L1. (L1_PUTX).
+  // **Transitions for forwarded write request from L1. Note that write request means only "L1_PUTX".
+  // L1_PUTX is discarded in MESI_CMP in every case unless the current state is "MT". Hence Forwarded L1_PUTX request
+  // also follows the same procedure and discarded the request if the block is not in state "MT".
+  transition({NP, IS, ISS, IM, SS, M, M_I, MT_I, MCT_I, I_I, S_I, SS_MB, M_MB, MT_IIB, MT_IB, MT_SB},BLK_FND_X){ 
+     // If the block is not in "MT" then no need to bring the block from the requesting L2 bank.
+     snak_sendACKToSenderL2; // ***This action will eventually discard the request from the requesting L2 bank.
+     ps2_popL2ResponceQueue;
+  }  
+  transition(MT,BLK_FND_X){ // The state is "MT", so bring the block from requested L2 for write back in this L2.
+     inltb_insertIntoLockTable;
+     set_setMRU;  // This is important and necessary as the block is currently locked for replacement and migration.
+     inmgt_insertIntoMigrationTable;
+     snbk_sendBlockACKToSenderL2;
+     pr2_popL2RequestQueue;
+  }
+  transition({NP, IS, ISS, IM, SS, M, M_I, MT_I, MCT_I, I_I, S_I, SS_MB, M_MB, MT_IIB, MT_IB, MT_SB},BLK_FW){ 
+    // The block changed from MT state after requesting for the block in the above transition "transition({MT,BLK_FND_X)".
+     dltb_deleteFromLockTab;
+     ps2_popL2ResponceQueue;
+  }  
+  transition(MT,BLK_FW,M){ // The block is in MT state so do operation same as do in simple MESI_CMP protocol. No need to add in local L1 request queue.
+    llx_clearSharers;
+    mrx_writeDataToCacheFromL2Responce;
+    tx_sendForwarededWBAck;
+    dltb_deleteFromLockTab;
+    ps2_popL2ResponceQueue;
+  }
+  // **** end of transitions for L1_PUTX. ********************
+
+
+  transition(TS,BLK_SND,NP){
+    fbf_forwardRequestedBlockToFriend;
+    rttb_removeTLATBEEntry;
+    ps2_popL2ResponceQueue;
+  }
+  //  ************* END OF SEARCH RELATED TRANSITIONS ******************** 
+
+  transition(TS,RECYC_RSPL2){ // No other initial states possible.
+     zzs_recycleL2ResponceQueue; 
+  }
+  
+  transition({SS,MT,M,IM, IS, ISS, SS_MB, M_MB, MT_MB, MT_IIB, MT_IB, MT_SB},RECYC_RQL2){
+     zzr_recycleL2RequestQueue; 
+  }
+
+}
