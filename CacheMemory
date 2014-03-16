@@ -154,7 +154,7 @@ public:
   void setLRU(const Address& address);
   
   // Code Added on March 16, 2014 by Arpit ------------------//
-  int convertToIntPriority(L2Cache_PEAPriority prio)
+  int convertToIntPriority(L2Cache_PEAPriority prio);
   int getIntPriority(const Address& addr);
   int getIntPriorityOfVictimBlock(const Address& addr);
   bool isLessPriorThanVictim(const int incommingBlockPriority,const Address& addr);
