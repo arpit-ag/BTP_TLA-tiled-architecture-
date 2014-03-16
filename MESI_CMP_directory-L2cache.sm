@@ -1,4 +1,3 @@
-
 /*
     Copyright (C) 1999-2005 by Mark D. Hill and David A. Wood for the
     Wisconsin Multifacet Project.  Contact: gems@cs.wisc.edu
@@ -190,6 +189,15 @@ machine(L2Cache, "MOSI Directory L2 Cache CMP") {
     MIGRATE_R,		desc="";
     // *********************** END of additional events *****************************************
   }
+  
+  // Code Added on March 16, 2014 by Arpit ------------------//
+  // PRIORITES
+  enumeration(PEAPriority, desc="L2 Cache lru-pea priorities") {
+    L1_Data,             desc="L1 means data has been used by some L1";
+    Promoted,    	desc="data has just been promoted";
+    Demoted,            desc="data has just been demoted";
+    Off_Chip, 		desc="data has just arrived into L2 from off-chip";
+  }
 
   // TYPES
 
@@ -200,6 +208,7 @@ machine(L2Cache, "MOSI Directory L2 Cache CMP") {
     MachineID Exclusive,          desc="Exclusive holder of block";
     DataBlock DataBlk,       desc="data for the block";
     bool Dirty, default="false", desc="data is dirty";
+    PEAPriority Peap,	     desc="cache priority for lru-pea scheme";
   }
 
   // TBE fields
@@ -232,6 +241,7 @@ machine(L2Cache, "MOSI Directory L2 Cache CMP") {
     int pendingAcks,		desc="number of pending acks for invalidates during writeback";
     TLATBEEntry entryType,	desc="Type of the entry. e.g., Searching, Replacement or Migration";
     NetDest Sharers,            desc="tracks the L1 shares on-chip";
+    PEAPriority Peap,	     desc="cache priority for lru-pea scheme";
   }
   structure(LockTAB, desc="Used to lock a block, especially during forwarded request access") {
     Address Address,            desc="TO DO";
@@ -289,6 +299,10 @@ external_type(CacheMemory) {
     void placeNewBlockInCache(Entry);
     bool isOlderThanVictim(Time,Address);
     void setLRU(Address);
+    // Code Added on March 16, 2014 by Arpit ------------------//
+    int getIntPriority(Address);
+    int getIntPriorityOfVictimBlock(Address);
+    bool isLessPriorThanVictim(int,Address);
   }
 
   external_type(TBETable) {
