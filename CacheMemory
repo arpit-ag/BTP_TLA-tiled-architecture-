@@ -77,6 +77,8 @@
 #include "RubySlicc_ComponentMapping.h"
 #include "PseudoLRUPolicy.h"
 #include "LRUPolicy.h"
+#include "LRUPEAPolicy.h"
+#include "L2Cache_PEAPriority.h"
 #include "/usr/include/string.h"
 #include <vector>
 
@@ -147,6 +149,11 @@ public:
   void placeNewBlockInPlaceOf(ENTRY newBlk, Address old_address);
   void placeNewBlockInCache(ENTRY newBlk);
   void setLRU(const Address& address);
+  
+  // Code Added on March 16, 2014 by Arpit ------------------//
+  int getIntPriority(const Address& addr);
+  int getIntPriorityOfVictimBlock(const Address& addr);
+  bool isLessPriorThanVictim(const int incommingBlockPriority,const Address& addr);
 
 private:
   // Private Methods
@@ -645,5 +652,49 @@ void CacheMemory<ENTRY>::setLRU(const Address& address)
   Time smallestTime=m_replacementPolicy_ptr->getLRUTime(cacheSet);
   m_replacementPolicy_ptr->touch(cacheSet, findTagInSet(cacheSet, address), smallestTime-1);
                                  
+}
+
+// **********************************************************************************************
+//       Functions added for LRUPEA (by Arpit) 
+// **********************************************************************************************
+
+template<class ENTRY>
+int CacheMemory<ENTRY>::getIntPriority(const Address& addr){
+   Index cacheSet = addressToCacheSet(addr);
+   int loc = findTagInSet(cacheSet, addr);
+   //return m_replacementPolicy_ptr->getLastAccess(cacheSet,loc); 
+   int pr = -1;
+   
+   switch (m_cache[cacheSet][loc].m_Peap) {
+		case L2Cache_PEAPriority_L1_Data:
+			pr = 3;
+			break;
+		case L2Cache_PEAPriority_Promoted:
+			pr = 2;
+			break;
+		case L2Cache_PEAPriority_Off_Chip:
+			pr = 1;
+			break;
+		case L2Cache_PEAPriority_Demoted:
+			pr = 0;
+			break;
+	 }
+	return pr;
+} 
+
+template<class ENTRY>
+bool CacheMemory<ENTRY>::isLessPriorThanVictim(const int incommingBlockPriority,const Address& addr){
+  int victimPriority = getIntPriorityOfVictimBlock(addr);
+  if(incommingBlockPriority <= victimPriority){
+    return true;
+  }else{
+    return false; 
+  }	
+}
+
+template<class ENTRY>
+int CacheMemory<ENTRY>::getIntPriorityOfVictimBlock(const Address& addr){
+  Address victimAddress=cacheProbe(addr);
+  return getIntPriority(victimAddress); 
 }
 #endif //CACHEMEMORY_H
