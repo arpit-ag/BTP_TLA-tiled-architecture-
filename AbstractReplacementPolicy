@@ -1,4 +1,3 @@
-
 #ifndef ABSTRACTREPLACEMENTPOLICY_H
 #define ABSTRACTREPLACEMENTPOLICY_H
 
@@ -15,6 +14,13 @@ public:
   virtual void touch(Index set, Index way, Time time) = 0; 
   /* returns the way to replace */
   virtual Index getVictim(Index set) const = 0;
+  
+  // **********************************************************************************************
+  //       Functions added for LRUPEA (by Arpit) 
+  // **********************************************************************************************
+  virtual void findVictims(Index set)  = 0;
+  virtual Index getVictim1(Index set) const = 0;
+  virtual Index getVictim2(Index set) const = 0;
   
   /* get the time of the last access */
   Time getLastAccess(Index set, Index way);
