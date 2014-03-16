@@ -158,6 +158,10 @@ public:
   int getIntPriority(const Address& addr);
   int getIntPriorityOfVictimBlock(const Address& addr);
   bool isLessPriorThanVictim(const int incommingBlockPriority,const Address& addr);
+  void setPrioL1Data(const Address& address);
+  void setPrioPromoted(const Address& address);
+  void setPrioOffChip(const Address& address);
+  void setPrioDemoted(const Address& address);
 
 private:
   // Private Methods
@@ -728,9 +732,62 @@ bool CacheMemory<ENTRY>::isLessPriorThanVictim(const int incommingBlockPriority,
   }	
 }
 
+
 template<class ENTRY>
 int CacheMemory<ENTRY>::getIntPriorityOfVictimBlock(const Address& addr){
   Address victimAddress=cacheProbeLruPea(addr);
   return getIntPriority(victimAddress); 
+}
+
+// Sets the Priority for a cache block
+template<class ENTRY>
+inline 
+void CacheMemory<ENTRY>::setPrioL1Data(const Address& address)
+{
+  Index cacheSet;
+
+  cacheSet = addressToCacheSet(address);
+  int loc = findTagInSet(cacheSet, addr);
+  m_cache[cacheSet][loc].m_Peap = L2Cache_PEAPriority_L1_Data;
+  
+}
+
+// Sets the Priority for a cache block
+template<class ENTRY>
+inline 
+void CacheMemory<ENTRY>::setPrioPromoted(const Address& address)
+{
+  Index cacheSet;
+
+  cacheSet = addressToCacheSet(address);
+  int loc = findTagInSet(cacheSet, addr);
+  m_cache[cacheSet][loc].m_Peap = L2Cache_PEAPriority_Promoted;
+  
+}
+
+// Sets the Priority for a cache block
+template<class ENTRY>
+inline 
+void CacheMemory<ENTRY>::setPrioOffChip(const Address& address)
+{
+  Index cacheSet;
+
+  cacheSet = addressToCacheSet(address);
+  int loc = findTagInSet(cacheSet, addr);
+  m_cache[cacheSet][loc].m_Peap = L2Cache_PEAPriority_Off_Chip;
+  
+}
+
+// Sets the Priority for a cache block
+template<class ENTRY>
+inline 
+void CacheMemory<ENTRY>::setPrioDemoted(const Address& address)
+{
+  Index cacheSet;
+
+  cacheSet = addressToCacheSet(address);
+  int loc = findTagInSet(cacheSet, addr);
+  m_cache[cacheSet][loc].m_Peap = L2Cache_PEAPriority_Demoted;
+  
 }
 #endif //CACHEMEMORY_H
