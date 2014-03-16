@@ -233,6 +233,8 @@ CacheMemory<ENTRY>::CacheMemory(AbstractChip* chip_ptr, int numSetBits,
     m_replacementPolicy_ptr = new PseudoLRUPolicy(m_cache_num_sets, m_cache_assoc);
   else if(strcmp(g_REPLACEMENT_POLICY, "LRU") == 0)
     m_replacementPolicy_ptr = new LRUPolicy(m_cache_num_sets, m_cache_assoc);
+  else if(strcmp(g_REPLACEMENT_POLICY, "LRUPEA") == 0)
+    m_replacementPolicy_ptr = new LRUPEAPolicy(m_cache_num_sets, m_cache_assoc);
   else
     assert(false);
   for (int i = 0; i < m_cache_num_sets; i++) {
