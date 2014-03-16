@@ -300,9 +300,14 @@ external_type(CacheMemory) {
     bool isOlderThanVictim(Time,Address);
     void setLRU(Address);
     // Code Added on March 16, 2014 by Arpit ------------------//
+    int convertToIntPriority(L2Cache_PEAPriority prio);
     int getIntPriority(Address);
     int getIntPriorityOfVictimBlock(Address);
     bool isLessPriorThanVictim(int,Address);
+    void setPrioL1Data(Address);
+    void setPrioPromoted(Address);
+    void setPrioOffChip(Address);
+    void setPrioDemoted(Address);
   }
 
   external_type(TBETable) {
@@ -544,6 +549,7 @@ external_type(CacheMemory) {
       MGRTABLE[address].lastAccess:=machineID;
       MGRTABLE[address].totalCount:=1;
    }
+   L2cacheMemory.setPrioL1Data(address);
   }  
 
 
@@ -607,19 +613,19 @@ external_type(CacheMemory) {
                            trigger(L1Cache_request_type_to_event_x(L2_TLATBEs[in_msg.Address].Type, in_msg.Address, L2_TLATBEs[in_msg.Address].Requestor), in_msg.Address);
 
                       // ********* REPLACEMENT PROCESS STARTS FROM HERE ************************
-                      }else if(L2_LOCKTAB.isPresent(L2cacheMemory.cacheProbe(in_msg.Address))){  // The local victime block is in search table then we cannot replace it.
+                      }else if(L2_LOCKTAB.isPresent(L2cacheMemory.cacheProbeLruPea(in_msg.Address))){  // The local victime block is in search table then we cannot replace it.
                            trigger(Event:RECYC_RSPL2,in_msg.Address);   
                       }else if(isNotCascadingReplacement()){  // If local replacement then no need to forward the victim block to the nighbouring friend.
 
-                        if(L2cacheMemory[L2cacheMemory.cacheProbe(in_msg.Address) ].Dirty) {
-                           trigger(Event:L2_Replacement, L2cacheMemory.cacheProbe(in_msg.Address)); // NO NEED to add "ps2_popL2ResponceQueue" to this transition. 
+                        if(L2cacheMemory[L2cacheMemory.cacheProbeLruPea(in_msg.Address) ].Dirty) {
+                           trigger(Event:L2_Replacement, L2cacheMemory.cacheProbeLruPea(in_msg.Address)); // NO NEED to add "ps2_popL2ResponceQueue" to this transition. 
                          }else {
-                           trigger(Event:L2_Replacement_clean, L2cacheMemory.cacheProbe(in_msg.Address));
+                           trigger(Event:L2_Replacement_clean, L2cacheMemory.cacheProbeLruPea(in_msg.Address));
                          }    
                       }else{ 
                           // No "clean" is required here because we are not actually replacing the block.
                           // We will only replace it, once the nack of replacement receive.
-                          trigger(Event:L2_CSD_Replacement, L2cacheMemory.cacheProbe(in_msg.Address)); // NO NEED to add "ps2_popL2ResponceQueue" to this transition. 
+                          trigger(Event:L2_CSD_Replacement, L2cacheMemory.cacheProbeLruPea(in_msg.Address)); // NO NEED to add "ps2_popL2ResponceQueue" to this transition. 
                       }
                      // ****** REPLACEMENT PROCESS END ***********************************
 
@@ -793,26 +799,26 @@ external_type(CacheMemory) {
                  }else{
                      trigger(Event:CSD_RPL_AS,in_msg.Address); // Note that the address is incomming block address and not the local victim block address. 
                  }
-             }else if(L2cacheMemory.isOlderThanVictim(in_msg.lastAccessed,in_msg.Address)){  
+             }else if(L2cacheMemory.isLessPriorThanVictim(in_msg.Priority,in_msg.Address)){  
                 if((get_CascadingRelacementCount()-in_msg.counter)==0){ // Is last cascading block. Used function is written in slicc component mapping.
                   trigger(Event:DISCARD_BLK,in_msg.Address);  // Discard the forwaded block.
                 }else{
                   trigger(Event:FWD_RPL,in_msg.Address); // Forward the forwarded block to the next neighbour.
                 }
              }else{
-                 if(L2_LOCKTAB.isPresent(L2cacheMemory.cacheProbe(in_msg.Address))){   
+                 if(L2_LOCKTAB.isPresent(L2cacheMemory.cacheProbeLruPea(in_msg.Address))){   
                     // A block currently in search table cannot be removed from the cache.
                     // This will be a rear case, as we make a block MRU before inserting that bloack into search table.
                     trigger(Event:RECYC_RQL2,in_msg.Address); // Recylce in local queue, let the original replacement initiator (another L2) to wait for the decision.
                  }else{
                     if((get_CascadingRelacementCount()-in_msg.counter)==0){ // If last cascading block then replace the local victime with forwarded victim.
-                       if(L2cacheMemory[L2cacheMemory.cacheProbe(in_msg.Address) ].Dirty) {
-                           trigger(Event:CSD_RPL, L2cacheMemory.cacheProbe(in_msg.Address)); // We can change the event name from CSD_RPL to something else.
+                       if(L2cacheMemory[L2cacheMemory.cacheProbeLruPea(in_msg.Address) ].Dirty) {
+                           trigger(Event:CSD_RPL, L2cacheMemory.cacheProbeLruPea(in_msg.Address)); // We can change the event name from CSD_RPL to something else.
                        }else {
-                           trigger(Event:CSD_RPL_clean, L2cacheMemory.cacheProbe(in_msg.Address));
+                           trigger(Event:CSD_RPL_clean, L2cacheMemory.cacheProbeLruPeain_msg.Address));
                        }
                     }else{  // Replace the local victime with forwarded victim and now continue cascading process with new forwarded victim.
-                        trigger(Event:R_CSD_RPL, L2cacheMemory.cacheProbe(in_msg.Address));
+                        trigger(Event:R_CSD_RPL, L2cacheMemory.cacheProbeLruPea(in_msg.Address));
                     }
                  }
              }
@@ -1046,16 +1052,25 @@ external_type(CacheMemory) {
   action(o_popIncomingResponseQueue, "o", desc="Pop Incoming Response queue") {
     profileMsgDelay(3, responseIntraChipL2Network_in.dequeue_getDelayCycles());
   }
-  action(m_writeDataToCache, "m", desc="Write data from response queue to cache") {
+  action(m_writeL1DataToCache, "m", desc="Write data from response queue to cache") {
     peek(responseIntraChipL2Network_in, ResponseMsg) {
       getL2CacheEntry(address).DataBlk := in_msg.DataBlk;
       getL2CacheEntry(address).Dirty := in_msg.Dirty;
+      L2cacheMemory.setPrioL1Data(address);
+    }
+  }
+  action(m_writeMemDataToCache, "m", desc="Write data from response queue to cache") {
+    peek(responseIntraChipL2Network_in, ResponseMsg) {
+      getL2CacheEntry(address).DataBlk := in_msg.DataBlk;
+      getL2CacheEntry(address).Dirty := in_msg.Dirty;
+      L2cacheMemory.setPrioOffChip(address);
     }
   }
   action(mr_writeDataToCacheFromRequest, "mr", desc="Write data from response queue to cache") {
     peek(L1RequestIntraChipL2Network_in, RequestMsg) {
       getL2CacheEntry(address).DataBlk := in_msg.DataBlk;
       getL2CacheEntry(address).Dirty := in_msg.Dirty;
+      L2cacheMemory.setPrioL1Data(address);
     }
   }
   action(q_updateAck, "q", desc="update pending ack count") {
@@ -1349,14 +1364,23 @@ action(invtl_insertVictimIntoTLATBE,"invtl",desc=""){
     L2_TLATBEs[address].Sharers := getL2CacheEntry(address).Sharers;
 }
 
+action(pmgcp_placeMigratedBlockIntoCache,"pmgcp",desc=""){
+   peek(L2RequestIntraChipL2Network_in,RequestMsgL2){
+      L2cacheMemory.placeNewBlockInPlaceOf(in_msg.cacheBlk,address);
+      L2cacheMemory.setPrioPromoted(in_msg.Address);  // address is same as in_msg.Address
+   }
+}
+
 action(pmgc_placeMigratedBlockIntoCache,"pmgc",desc=""){
    peek(L2RequestIntraChipL2Network_in,RequestMsgL2){
       L2cacheMemory.placeNewBlockInPlaceOf(in_msg.cacheBlk,address);
+      L2cacheMemory.setPrioDemoted(in_msg.Address);
    }
 }
 action(pmgc2_placeMigratedBlockIntoCache,"pmgc2",desc=""){
    peek(L2RequestIntraChipL2Network_in,RequestMsgL2){
       L2cacheMemory.placeNewBlockInCache(in_msg.cacheBlk);
+      L2cacheMemory.setPrioDemoted(in_msg.Address);  // address is same as in_msg.Address
    }
 }
 
@@ -1398,7 +1422,7 @@ action(isor_issueOneHopeReplacement,"isor",desc=""){
         out_msg.TypeL2:=CoherenceRequestType:BLK_CSD_RPL;
         out_msg.cacheBlk:=getL2CacheEntry(address);
         out_msg.lastAccessed:=L2cacheMemory.getLastAccessTime(address);
-        out_msg.counter:=1;
+        out_msg.counter:=3;
         out_msg.Destination.add(in_msg.Requestor);
         out_msg.MessageSize:=MessageSizeType:Response_Data;
      }     
@@ -1783,21 +1807,21 @@ action(bsx_startBankSetSearch_X,"bsx",desc="Bankset search."){ // Action current
 
   // transitions from IS/IM
   transition(ISS, Mem_Data, MT_MB) {
-    m_writeDataToCache;
+    m_writeMemDataToCache;
     ex_sendExclusiveDataToGetSRequestors;
     s_deallocateTBE;
     o_popIncomingResponseQueue;
   }
 
   transition(IS, Mem_Data, SS) {
-    m_writeDataToCache;
+    m_writeMemDataToCache;
     e_sendDataToGetSRequestors;
     s_deallocateTBE;
     o_popIncomingResponseQueue;
   }
 
   transition(IM, Mem_Data, MT_MB) {
-    m_writeDataToCache;
+    m_writeMemDataToCache;
     ee_sendDataToGetXRequestor;
     s_deallocateTBE;
     o_popIncomingResponseQueue;
@@ -1929,12 +1953,12 @@ action(bsx_startBankSetSearch_X,"bsx",desc="Bankset search."){ // Action current
   }
 
   transition(MT_IIB, {WB_Data, WB_Data_clean}, MT_SB) {
-    m_writeDataToCache;
+    m_writeL1DataToCache;
     o_popIncomingResponseQueue;
   }
 
   transition(MT_IB, {WB_Data, WB_Data_clean}, SS) {
-    m_writeDataToCache;
+    m_writeL1DataToCache;
     o_popIncomingResponseQueue;
   }
 
@@ -2286,7 +2310,7 @@ action(bsx_startBankSetSearch_X,"bsx",desc="Bankset search."){ // Action current
   }
   transition({SS,MT,M},MIGRATE_P){
      al2_allocateL2;
-     pmgc_placeMigratedBlockIntoCache;
+     pmgcp_placeMigratedBlockIntoCache;
      saki_sendAckToMigrationInvoker;
      set_setMRU;
      pr2_popL2RequestQueue;
@@ -2294,7 +2318,7 @@ action(bsx_startBankSetSearch_X,"bsx",desc="Bankset search."){ // Action current
   transition({SS,M,MT},MIGRATE_R){
      invtl_insertVictimIntoTLATBE;
      isor_issueOneHopeReplacement;  // This command must be before "pmgc", otherwise the correcponding action will send wrong block.
-     pmgc_placeMigratedBlockIntoCache;
+     pmgcp_placeMigratedBlockIntoCache;
      saki_sendAckToMigrationInvoker;
      setr_setMRUFromRequestQueue;
      pr2_popL2RequestQueue;  
