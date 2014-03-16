@@ -117,6 +117,9 @@ public:
 
   // Returns with the physical address of the conflicting cache line
   Address cacheProbe(const Address& address) const;
+  
+  // Returns with the physical address of the conflicting cache line according to lru-pea
+  Address cacheProbeLruPea(const Address& address) const;
 
   // looks an address up in the cache
   ENTRY& lookup(const Address& address);
@@ -151,6 +154,7 @@ public:
   void setLRU(const Address& address);
   
   // Code Added on March 16, 2014 by Arpit ------------------//
+  int convertToIntPriority(L2Cache_PEAPriority prio)
   int getIntPriority(const Address& addr);
   int getIntPriorityOfVictimBlock(const Address& addr);
   bool isLessPriorThanVictim(const int incommingBlockPriority,const Address& addr);
@@ -163,7 +167,7 @@ private:
 
   // Given a cache tag: returns the index of the tag in a set.
   // returns -1 if the tag is not found.
-  int findTagInSet(Index line, const Address& tag) const;
+  int findTagInSet(Index cacheSet, const Address& tag) const;
   int findTagInSetIgnorePermissions(Index cacheSet, const Address& tag) const;
 
   // Private copy constructor and assignment operator
@@ -658,14 +662,38 @@ void CacheMemory<ENTRY>::setLRU(const Address& address)
 //       Functions added for LRUPEA (by Arpit) 
 // **********************************************************************************************
 
+// Returns with the physical address of the conflicting cache line according to lru-pea
 template<class ENTRY>
-int CacheMemory<ENTRY>::getIntPriority(const Address& addr){
-   Index cacheSet = addressToCacheSet(addr);
-   int loc = findTagInSet(cacheSet, addr);
-   //return m_replacementPolicy_ptr->getLastAccess(cacheSet,loc); 
+inline 
+Address CacheMemory<ENTRY>::cacheProbeLruPea(const Address& address) const
+{
+  assert(address == line_address(address));
+  assert(!cacheAvail(address));
+
+  Index cacheSet = addressToCacheSet(address);
+  int lru,lru1;
+  m_replacementPolicy_ptr->findVictims(cacheSet);
+  lru = m_replacementPolicy_ptr->getVictim1(cacheSet);
+  lru1 = m_replacementPolicy_ptr->getVictim2(cacheSet);
+  
+  int lrup = -1, lru1p = -1;
+  // Apply LRU-PEA to find local entry to be evicted
+  
+  lrup = convertToIntPriority(m_cache[cacheSet][lru].m_Peap);
+  lru1p = convertToIntPriority(m_cache[cacheSet][lru1.m_Peap);
+  
+  if(lrup <= lru1p)
+  	return m_cache[cacheSet][lru].m_Address;
+  else
+  	return m_cache[cacheSet][lru1].m_Address
+  
+}
+
+template<class ENTRY>
+int CacheMemory<ENTRY>::convertToIntPriority(L2Cache_PEAPriority prio){
    int pr = -1;
    
-   switch (m_cache[cacheSet][loc].m_Peap) {
+   switch (prio) {
 		case L2Cache_PEAPriority_L1_Data:
 			pr = 3;
 			break;
@@ -679,7 +707,15 @@ int CacheMemory<ENTRY>::getIntPriority(const Address& addr){
 			pr = 0;
 			break;
 	 }
-	return pr;
+  return pr;
+}
+template<class ENTRY>
+int CacheMemory<ENTRY>::getIntPriority(const Address& addr){
+   Index cacheSet = addressToCacheSet(addr);
+   int loc = findTagInSet(cacheSet, addr);
+   //return m_replacementPolicy_ptr->getLastAccess(cacheSet,loc); 
+   return convertToIntPriority(m_cache[cacheSet][loc].m_Peap);
+   
 } 
 
 template<class ENTRY>
@@ -694,7 +730,7 @@ bool CacheMemory<ENTRY>::isLessPriorThanVictim(const int incommingBlockPriority,
 
 template<class ENTRY>
 int CacheMemory<ENTRY>::getIntPriorityOfVictimBlock(const Address& addr){
-  Address victimAddress=cacheProbe(addr);
+  Address victimAddress=cacheProbeLruPea(addr);
   return getIntPriority(victimAddress); 
 }
 #endif //CACHEMEMORY_H
