@@ -81,6 +81,7 @@
 #include "L2Cache_PEAPriority.h"
 #include "/usr/include/string.h"
 #include <vector>
+#include<utility>
 
 template<class ENTRY>
 class CacheMemory {
@@ -678,9 +679,12 @@ Address CacheMemory<ENTRY>::cacheProbeLruPea(const Address& address) const
 
   Index cacheSet = addressToCacheSet(address);
   int lru,lru1;
-  m_replacementPolicy_ptr->findVictims(cacheSet);
-  lru = m_replacementPolicy_ptr->getVictim1(cacheSet);
-  lru1 = m_replacementPolicy_ptr->getVictim2(cacheSet);
+  pair<int,int> victims;
+  victims = m_replacementPolicy_ptr->findVictims(cacheSet);
+  lru = victims.first;
+  lru1 = victims.second;
+  //lru = m_replacementPolicy_ptr->getVictim1(cacheSet);
+  //lru1 = m_replacementPolicy_ptr->getVictim2(cacheSet);
   
   int lrup = -1, lru1p = -1;
   // Apply LRU-PEA to find local entry to be evicted
