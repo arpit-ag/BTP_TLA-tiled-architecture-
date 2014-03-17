@@ -1,9 +1,9 @@
-
 #ifndef LRUPEAPolicy_H
 #define LRUPEAPolicy_H
 
 #include "AbstractReplacementPolicy.h"
 #include "L2Cache_PEAPriority.h"
+#include <utility>
 
 /* Simple true LRU - PEA replacement policy */
 
@@ -15,7 +15,8 @@ class LRUPEAPolicy : public AbstractReplacementPolicy {
 
   void touch(Index set, Index way, Time time);
   Index getVictim(Index set) const;
-  void findVictims(Index set);
+  //void findVictims(Index set);
+  pair<Index,Index> findVictims(Index set);
   Index getVictim1(Index set) const;
   Index getVictim2(Index set) const;
 
@@ -70,7 +71,7 @@ Index LRUPEAPolicy::getVictim(Index set) const {
 }
 
 inline
-void LRUPEAPolicy::findVictims(Index set){
+pair<Index,Index> LRUPEAPolicy::findVictims(Index set){
   //  assert(m_assoc != 0);
   Time time, smallest_time, next_smallest_time;
 
@@ -108,7 +109,7 @@ void LRUPEAPolicy::findVictims(Index set){
   //  DEBUG_EXPR(CACHE_COMP, MedPrio, m_cache[cacheSet][smallest_index]);
   //  DEBUG_EXPR(CACHE_COMP, MedPrio, *this);
 
-  //return smallest_index;
+  return make_pair(smallest_index,next_smallest_index);
 }
 
 inline
