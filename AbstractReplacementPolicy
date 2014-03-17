@@ -2,6 +2,7 @@
 #define ABSTRACTREPLACEMENTPOLICY_H
 
 #include "Global.h"
+#include <utility>
 
 class AbstractReplacementPolicy {
 
@@ -18,7 +19,8 @@ public:
   // **********************************************************************************************
   //       Functions added for LRUPEA (by Arpit) 
   // **********************************************************************************************
-  virtual void findVictims(Index set)  = 0;
+  //virtual void findVictims(Index set)  = 0;
+  virtual pair<Index,Index> findVictims(Index set)  = 0;
   virtual Index getVictim1(Index set) const = 0;
   virtual Index getVictim2(Index set) const = 0;
   
