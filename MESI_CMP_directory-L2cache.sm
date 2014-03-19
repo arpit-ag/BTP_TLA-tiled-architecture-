@@ -209,6 +209,7 @@ machine(L2Cache, "MOSI Directory L2 Cache CMP") {
     DataBlock DataBlk,       desc="data for the block";
     bool Dirty, default="false", desc="data is dirty";
     PEAPriority Peap,	     desc="cache priority for lru-pea scheme";
+    int PSEL;   desc="policy selector for insertion in a cacheset";
   }
 
   // TBE fields
