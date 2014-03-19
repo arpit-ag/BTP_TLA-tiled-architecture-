@@ -82,6 +82,7 @@
 #include "/usr/include/string.h"
 #include <vector>
 #include<utility>
+#include <stdlib.h>  
 
 template<class ENTRY>
 class CacheMemory {
@@ -153,6 +154,12 @@ public:
   void placeNewBlockInPlaceOf(ENTRY newBlk, Address old_address);
   void placeNewBlockInCache(ENTRY newBlk);
   void setLRU(const Address& address);
+  
+  double unifrand();
+  bool isLRUBetter();
+  void setBIP(const Address& address);
+  void setCacheLine(const Address& address);
+  
   
   // Code Added on March 16, 2014 by Arpit ------------------//
   int convertToIntPriority(L2Cache_PEAPriority prio);
@@ -664,6 +671,60 @@ void CacheMemory<ENTRY>::setLRU(const Address& address)
   m_replacementPolicy_ptr->touch(cacheSet, findTagInSet(cacheSet, address), smallestTime-1);
                                  
 }
+
+// **********************************************************************************************
+//       Functions added for DIP (by Arpit) 
+// **********************************************************************************************
+
+
+template<class ENTRY>
+inline 
+double CacheMemory<ENTRY>:: unifrand()
+{
+    return (double)rand() / (double)RAND_MAX ;
+}
+
+template<class ENTRY>
+inline 
+bool CacheMemory<ENTRY>::isLRUBetter()
+{
+	if (m_PSEL < 32)  // MSB of 6 bit saturated counter is 0
+		return true;
+	else	 // MSB of 6 bit saturated counter is 1
+		return false;
+}
+
+template<class ENTRY>
+inline 
+void CacheMemory<ENTRY>::setBIP(const Address& address)
+{
+  Index cacheSet;
+  cacheSet = addressToCacheSet(address);
+  double btp = (1/32);  // bimodal throttle parameter
+  if(unifrand() < btp)
+  	setMRU(address);
+  else
+  	setLRU(adress);
+                                 
+}
+
+template<class ENTRY>
+inline 
+void CacheMemory<ENTRY>::setCacheLine(const Address& address)
+{
+  Index cacheSet;
+  cacheSet = addressToCacheSet(address);
+  bool sel_lru = isLRUBetter();
+  
+  if((cacheset % 32) == 0 || sel_lru)  // LRU Dedicated set
+  	setLRU(adress);
+  else if ((cacheset % 32) == 31)  // BIP Dedicated set
+  	setBIP(address);
+  else
+  	setBIP(address);  // if BIP is performing better
+                                 
+}
+
 
 // **********************************************************************************************
 //       Functions added for LRUPEA (by Arpit) 
