@@ -717,7 +717,7 @@ void CacheMemory<ENTRY>::setCacheLine(const Address& address)
   bool sel_lru = isLRUBetter();
   
   if((cacheset % 32) == 0 || sel_lru)  // LRU Dedicated set
-  	setLRU(adress);
+  	setMRU(adress);
   else if ((cacheset % 32) == 31)  // BIP Dedicated set
   	setBIP(address);
   else
