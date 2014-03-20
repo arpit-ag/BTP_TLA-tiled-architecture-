@@ -209,7 +209,7 @@ machine(L2Cache, "MOSI Directory L2 Cache CMP") {
     DataBlock DataBlk,       desc="data for the block";
     bool Dirty, default="false", desc="data is dirty";
     PEAPriority Peap,	     desc="cache priority for lru-pea scheme";
-    int PSEL;   desc="policy selector for insertion in a cacheset";
+    
   }
 
   // TBE fields
@@ -300,6 +300,12 @@ external_type(CacheMemory) {
     void placeNewBlockInCache(Entry);
     bool isOlderThanVictim(Time,Address);
     void setLRU(Address);
+    
+    // Code Added on March 20, 2014 by Arpit ------------------//
+    void setBIP(Address);
+    void setCacheLine(Address);
+    void ChangePSEL(Address);
+    
     // Code Added on March 16, 2014 by Arpit ------------------//
     int convertToIntPriority(L2Cache_PEAPriority prio);
     int getIntPriority(Address);
@@ -1689,7 +1695,11 @@ action(bsx_startBankSetSearch_X,"bsx",desc="Bankset search."){ // Action current
     L2cacheMemory.deallocate(address);
   }
 
-
+  action(cpsel_changePSEL, "\q", desc="Change the PSEL counter of the L2 cache according to miss in the cacheset") {
+    if (L2cacheMemory.isTagPresent(address) == false) {
+      L2cacheMemory.ChangePSEL(address);
+    }
+  }
 
   action(uux_profileMiss, "ux", desc="Profile the demand miss") {
     profile_L2Cache_miss(convertToGenericType(L2_TLATBEs[address].Type), L2_TLATBEs[address].AccessMode, MessageSizeTypeToInt(MessageSizeType:Control), L2_TLATBEs[address].prefetch, L1CacheMachIDToProcessorNum(L2_TLATBEs[address].Requestor));
@@ -1721,6 +1731,12 @@ action(bsx_startBankSetSearch_X,"bsx",desc="Bankset search."){ // Action current
     }
   }
 
+
+ action(setcl_setCacheLine, "setr", desc="set the entry accordingPSEL") {
+     peek(L2RequestIntraChipL2Network_in,RequestMsgL2){
+       L2cacheMemory.setCacheLine(in_msg.Address);
+     }
+  }
  action(setr_setMRUFromRequestQueue, "setr", desc="set the MRU entry") {
      peek(L2RequestIntraChipL2Network_in,RequestMsgL2){
        L2cacheMemory.setMRU(in_msg.Address);
@@ -2042,6 +2058,7 @@ action(bsx_startBankSetSearch_X,"bsx",desc="Bankset search."){ // Action current
   // DTLA----- Transitions added (By Shirshendu Das) for implementing DTLA..
   // ************************************************************************************
   transition(NP, L1_GET_INSTR_X, IS) {
+    cpsel_changePSEL;
     qq_allocateL2CacheBlock;
     llx_clearSharers;
     nnx_addSharer;
@@ -2055,6 +2072,7 @@ action(bsx_startBankSetSearch_X,"bsx",desc="Bankset search."){ // Action current
   }
 
   transition(NP, L1_GETS_X,  ISS) { // This transition is required because in case of DTLA, when the miss occures the request may be stored in TLATBE and not in queue. 
+    cpsel_changePSEL;
     qq_allocateL2CacheBlock;
     llx_clearSharers;  // any action rewritten with x are for the TLATBE. 
     nnx_addSharer;
@@ -2068,6 +2086,7 @@ action(bsx_startBankSetSearch_X,"bsx",desc="Bankset search."){ // Action current
   }
 
   transition(NP, L1_GETX_X, IM) {  
+    cpsel_changePSEL;
     qq_allocateL2CacheBlock;
     llx_clearSharers;
     // nn_addSharer;
