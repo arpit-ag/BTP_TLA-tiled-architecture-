@@ -155,10 +155,12 @@ public:
   void placeNewBlockInCache(ENTRY newBlk);
   void setLRU(const Address& address);
   
+  // Code Added on March 20, 2014 by Arpit ------------------//
   double unifrand();
   bool isLRUBetter();
   void setBIP(const Address& address);
   void setCacheLine(const Address& address);
+  void ChangePSEL(const Address& address);
   
   
   // Code Added on March 16, 2014 by Arpit ------------------//
@@ -201,6 +203,7 @@ private:
   int m_cache_num_sets;
   int m_cache_num_set_bits;
   int m_cache_assoc;
+  int m_PSEL;   //policy selector for insertion in a cacheset
 };
 
 // Output operator declaration
@@ -235,6 +238,7 @@ CacheMemory<ENTRY>::CacheMemory(AbstractChip* chip_ptr, int numSetBits,
   m_cache_num_sets = 1 << numSetBits;
   m_cache_assoc = cacheAssoc;
   m_is_instruction_cache = false;
+  m_PSEL = 0;
 
   m_cache.setSize(m_cache_num_sets);
   if(strcmp(g_REPLACEMENT_POLICY, "PSEDUO_LRU") == 0)
@@ -675,6 +679,18 @@ void CacheMemory<ENTRY>::setLRU(const Address& address)
 // **********************************************************************************************
 //       Functions added for DIP (by Arpit) 
 // **********************************************************************************************
+
+template<class ENTRY>
+inline 
+void CacheMemory<ENTRY>:: ChangePSEL(const Address& address)
+{
+    Index cacheSet;
+    cacheSet = addressToCacheSet(address);
+    if((cacheset % 32) == 0)  // LRU Dedicated set
+    	m_PSEL += 1;
+    else if((cacheset % 32) == 31)  // BIP Dedicated set
+    	m_PSEL += -1;
+}
 
 
 template<class ENTRY>
